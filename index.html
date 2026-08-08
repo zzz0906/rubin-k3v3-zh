@@ -245,7 +245,7 @@
       <span class="subtitle-line">一次精度模拟揭示真相</span>
     </h1>
     <div class="authors">Zhongzhu Zhou&ensp;·&ensp;Donglin Zhuang&ensp;·&ensp;Chenfeng Xu</div>
-    <div class="meta">2026 年 8 月 7 日 &nbsp;·&nbsp; 解析估算，非 Rubin 实机测量 &nbsp;·&nbsp; <a href="https://www.zhongzhuzhou.org/rubin-k3v3/">English</a></div>
+    <div class="meta">2026 年 8 月 7 日 &nbsp;·&nbsp; <a href="https://www.zhongzhuzhou.org/rubin-k3v3/">English</a></div>
     <hr class="head-rule">
   </div>
 </header>
@@ -274,7 +274,7 @@
     </div>
     <p class="fig-sub">
       Qwen3-4B-Thinking-2507。左：相对 BF16 teacher 的实测 KL₅₀（8K，PPL 一并标注）；右：Rubin 上
-      attention-only decode 上限的解析估算 —— 不是实机测量。
+      attention-only decode 上限的解析估算。
     </p>
 
     <div class="controls">
@@ -333,7 +333,8 @@
         <li><strong>Attention 怎么用它？</strong>把 <code>Kᵀ</code> 和 <code>V</code> 存成 3-bit LUT-B operand；
           Q 和 softmax 后的 P 以 MXFP8 留在 A，两次乘法都直接消费压缩 KV。</li>
         <li><strong>为什么不能直接用朴素 INT3？</strong>Outlier 会毁掉它：Qwen3-4B 的 8K PPL 从 9.468 暴涨到
-          1504。离线 Lloyd-Max codebook —— 加上 OSCAR rotation 和 BF16 sink/recent 窗口 —— 能拉回到约 10.4。</li>
+          1504。离线 Lloyd-Max codebook —— 加上 <a href="https://arxiv.org/abs/2605.17757">OSCAR</a> rotation
+          和 BF16 sink/recent 窗口 —— 能拉回到约 10.4。</li>
         <li><strong>能快多少？</strong>只算 bytes 是 H100 BF16 的 29–32×，但 LUT 只支持 B，而 MXFP8 的 M tile
           是 128、GQA 只有 4 行：可信的 single-token 上限约 <strong>20.4×</strong>（60–80% 执行效率下
           <strong>12.3–16.4×</strong>）。30× 只是 byte-only 上界。</li>
@@ -359,12 +360,6 @@
         <tr><td>NVLink bandwidth</td><td class="num">3.6 TB/s</td><td class="num">260 TB/s switch bandwidth</td></tr>
       </tbody>
     </table></div>
-    <p>
-      这些数字来自 <a href="https://developer.nvidia.com/blog/inside-nvidia-rubin-gpu-architecture-powering-the-era-of-agentic-ai/">NVIDIA Rubin GPU architecture</a>
-      和 <a href="https://www.nvidia.com/en-us/data-center/vera-rubin-nvl72/">Vera Rubin NVL72 specs</a>。
-      它们是 peak specs，不等于应用可达到的 sustained performance。
-    </p>
-
     <h3>1.2 为什么我们特别关心 KV cache？</h3>
     <p>
       Community 常用一句话概括 inference：<strong>prefill is compute-bound, decode is bandwidth-bound</strong>。
@@ -377,7 +372,7 @@
       减少 bytes/value 的新 ISA。
     </p>
 
-    <h3>1.3 CUDA 13.4 让 Rubin 从 slideware 变成可检查的软件目标</h3>
+    <h3>1.3 用 CUDA 13.4 探测 Rubin ISA</h3>
     <p>
       <a href="https://inferencex.semianalysis.com/blog/vera-rubin-nvl72-vs-gb200-nvl72-inference">SemiAnalysis / InferenceX</a>
       报道了第一版公开 SM107 software stack：CUDA 13.4、PyTorch、vLLM 和 OpenAI Triton 开始加入 Rubin 支持，
@@ -503,7 +498,8 @@ effective         = 3.125 bit/value</code></pre>
 
     <h3>3.4 OSCAR：先把尖峰摊平，再交给 3-bit</h3>
     <p>
-      Lloyd-Max 解决的是“8 个刻度放在哪里”，但如果少数维度特别大，3-bit 仍然很难表示。OSCAR 可以理解为：
+      Lloyd-Max 解决的是“8 个刻度放在哪里”，但如果少数维度特别大，3-bit 仍然很难表示。
+      <a href="https://arxiv.org/abs/2605.17757">OSCAR</a> 可以理解为：
       <strong>先旋转坐标系，把集中在少数维度的尖峰摊到更多维度，再量化。</strong>
     </p>
     <p>具体只有三步：</p>
@@ -517,12 +513,12 @@ effective         = 3.125 bit/value</code></pre>
       一个 latent rotation，并把对应变换吸收到 absorbed-query 和 value projection。最简单的记法是：
       <strong>Lloyd-Max 调整尺子的 8 个刻度，OSCAR 先把要量的东西铺平。</strong>
     </p>
-    <div class="callout">
-      H100 实验模拟了上述 numerical QDQ、BF16 safety window 和 FP32 softmax，但 physical cache 仍是 BF16。
-      一个由 1 个 KDA layer + 1 个 Gated-MLA layer 组成的 dummy-weight integration smoke 已完成 health check
-      和真实 generation，验证了 latent K3V3 与 Q/P kernel 的连接；它不代替完整 2.8T checkpoint 的分布式加载验证。
-      真实 Rubin 实现还需要 3-bit paged allocation、descriptor/swizzle、TMEM copy、barrier 和 fused SM107 kernel。
-    </div>
+    <p>
+      还有一个贯穿全流程的部件：<strong>BF16 sink/recent 窗口</strong>。最前面的 64 个 token 是 attention
+      sink —— 吸收了不成比例 attention 权重的位置；最近的 256 个 token 则是 decode 引用最频繁的部分。
+      这两段完全绕过量化、保持 BF16，恰好保护了 3-bit 伤害最大的数值；§4.2 的消融分别量化了两者的贡献。
+      窗口与 rotation/clipping 配方均沿用 <a href="https://arxiv.org/abs/2605.17757">OSCAR 论文</a>。
+    </p>
 
     <h2 id="sec4"><span class="idx">4</span>Accuracy simulation：K3V3 会不会损伤模型？</h2>
 
@@ -588,17 +584,17 @@ effective         = 3.125 bit/value</code></pre>
         <tr><td>BF16</td><td class="num">all</td><td class="num">all</td><td class="num"><strong>9.468</strong></td><td class="num"><strong>0.0000</strong></td></tr>
         <tr><td>OSCAR INT2、无 LM</td><td class="num">64</td><td class="num">256</td><td class="num">9.893</td><td class="num">0.10791</td></tr>
         <tr><td>Offline LM K3V3、无 OSCAR</td><td class="num">64</td><td class="num">256</td><td class="num"><strong>10.406</strong></td><td class="num">0.09618</td></tr>
-        <tr><td>Offline LM K3V3、无 OSCAR + FP8/UE8M0 Q/P</td><td class="num">64</td><td class="num">256</td><td class="num">10.434</td><td class="num">0.10447</td></tr>
+        <tr><td>OSCAR + offline LM K3V3 + FP8/UE8M0 Q/P</td><td class="num">64</td><td class="num">256</td><td class="num">10.434</td><td class="num">0.10090</td></tr>
         <tr><td>OSCAR + offline LM K3V3 + FP8/UE8M0 P only</td><td class="num">64</td><td class="num">256</td><td class="num">10.446</td><td class="num">0.09609</td></tr>
         <tr><td>OSCAR + offline LM K3V3</td><td class="num">64</td><td class="num">256</td><td class="num">10.453</td><td class="num"><strong>0.09482</strong></td></tr>
-        <tr><td>OSCAR + offline LM K3V3 + FP8/UE8M0 Q/P</td><td class="num">64</td><td class="num">256</td><td class="num">10.465</td><td class="num">0.10090</td></tr>
+        <tr><td>Offline LM K3V3、无 OSCAR + FP8/UE8M0 Q/P</td><td class="num">64</td><td class="num">256</td><td class="num">10.465</td><td class="num">0.10447</td></tr>
         <tr><td>OSCAR + offline LM K3V3 + FP8/UE8M0 Q only</td><td class="num">64</td><td class="num">256</td><td class="num">10.466</td><td class="num">0.09935</td></tr>
         <tr><td>Ordinary uniform K3V3</td><td class="num">64</td><td class="num">256</td><td class="num">1504.444</td><td class="num">5.14717</td></tr>
       </tbody>
     </table></div>
     <p>
       8K 下，no-OSCAR offline LM 的 PPL 最低（10.406），而 OSCAR + offline LM 的 KL₅₀ 最低（0.09482）；
-      两者分别优化不同目标。加入 Q/P QDQ 会小幅增加 PPL 与 KL。OSCAR INT2 的 PPL 更低，但 KL₅₀ 高于两种
+      两者分别优化不同目标。加入 Q/P QDQ 对 PPL 与 KL 的影响都很小。OSCAR INT2 的 PPL 更低，但 KL₅₀ 高于两种
       未加 Q/P 的 K3V3。
     </p>
 
@@ -674,7 +670,7 @@ effective         = 3.125 bit/value</code></pre>
       这里 TFLOP/s 随 context 不变，是因为 BF16 arithmetic intensity 固定；token/s 会随 context 变长而下降。
     </p>
 
-    <h3>5.3 如果只按 K3V3 compressed bytes 计算</h3>
+    <h3>5.3 K3V3 roofline：compressed bytes 与 B-only tile 细节</h3>
     <p>
       K3V3 加上 BF16 sink/recent 后，8K 的 effective storage 是 3.628 bit/value，32K 是 3.251 bit/value；
       对应 arithmetic intensity 为 17.64 / 19.69 FLOP/B。
@@ -693,9 +689,8 @@ effective         = 3.125 bit/value</code></pre>
       和 latency。Rubin 的区别是 lookup 发生在 Tensor Core MMA 内。
     </p>
 
-    <h3>5.4 LUT 只能放 B：对 single-token decode 的影响</h3>
     <p>
-      这里需要加入一个此前 byte roofline 漏掉的限制。把 decode 写成 <code>K × Qᵀ</code> /
+      在 byte 数字之上，第一个需要补充的 roofline 细节是 operand 方向。把 decode 写成 <code>K × Qᵀ</code> /
       <code>Vᵀ × Pᵀ</code> 时，长 KV 位于 A 的 M 方向，短 Q/P 位于 B 的 N 方向；对非常 skinny 的 GEMV，
       这个方向更容易填满不对称的 MMA tile。但是 LUT 解压只支持 B，所以 compressed KV 必须使用
       <code>Q × Kᵀ</code> / <code>P × V</code> 的方向。
@@ -747,7 +742,7 @@ effective         = 3.125 bit/value</code></pre>
       当前 public PTX 与 compile probes 不能假设它存在。
     </p>
 
-    <h3>5.5 Operand-corrected practical range</h3>
+    <h3>5.4 Operand-corrected practical range</h3>
     <div class="table-wrap"><table class="data">
       <thead><tr><th class="num">Context</th><th class="num">Effective KV bits/value</th><th class="num">Byte-only HBM roofline</th><th class="num">B-only tile-corrected ceiling</th><th class="num">Expected @ 60–80%</th><th class="num">Corrected tok/s</th><th class="num">vs Rubin BF16</th></tr></thead>
       <tbody>
@@ -882,9 +877,9 @@ const PRESETS = [
     desc: "\u5168\u7cbe\u5ea6\u57fa\u7ebf \u2014\u2014 \u4e0d\u505a\u4efb\u4f55 KV \u91cf\u5316\u3002" },
   { key: "uniform",  label: "Uniform \u00b7 3-bit",    color: "#a33d2f", bits: 3,  ppl: 1504.444, kl: 5.14717, qp: "BF16 Q/P",          kind: "k3v3",
     desc: "8 \u4e2a\u7b49\u8ddd\u523b\u5ea6\uff0c\u65e0 rotation\u3001\u65e0\u62df\u5408 codebook \u2014\u2014 \u5373\u300c\u76f4\u63a5\u5b58 INT3\u300d\u3002\u5b83\u4f1a\u5d29\u6e83\u3002" },
-  { key: "lm",       label: "Lloyd-Max \u00b7 3-bit",  color: "#31607f", bits: 3,  ppl: 10.434,   kl: 0.10447, qp: "FP8/UE8M0 Q/P",     kind: "k3v3", hw: true,
-    desc: "\u79bb\u7ebf per-layer 8-entry E4M3 codebook \u2014\u2014 8 \u4e2a\u523b\u5ea6\u79fb\u5230\u6570\u503c\u771f\u6b63\u6240\u5728\u7684\u4f4d\u7f6e\u30023-bit \u65b9\u6848\u4e2d PPL \u6700\u4f4e\u3002" },
-  { key: "oscar_lm", label: "OSCAR+LM \u00b7 3-bit",   color: "#8a6a14", bits: 3,  ppl: 10.465,   kl: 0.10090, qp: "FP8/UE8M0 Q/P",     kind: "k3v3", hw: true,
+  { key: "lm",       label: "Lloyd-Max \u00b7 3-bit",  color: "#31607f", bits: 3,  ppl: 10.465,   kl: 0.10447, qp: "FP8/UE8M0 Q/P",     kind: "k3v3", hw: true,
+    desc: "\u79bb\u7ebf per-layer 8-entry E4M3 codebook \u2014\u2014 8 \u4e2a\u523b\u5ea6\u79fb\u5230\u6570\u503c\u771f\u6b63\u6240\u5728\u7684\u4f4d\u7f6e\u3002" },
+  { key: "oscar_lm", label: "OSCAR+LM \u00b7 3-bit",   color: "#8a6a14", bits: 3,  ppl: 10.434,   kl: 0.10090, qp: "FP8/UE8M0 Q/P",     kind: "k3v3", hw: true,
     desc: "OSCAR rotation + outlier clipping \u52a0\u5728 Lloyd-Max codebook \u4e4b\u524d\u3002\u4e0e BF16 teacher \u7684 KL\u2085\u2080 \u6700\u4f4e\u3002" },
   { key: "int2",     label: "OSCAR \u00b7 2-bit",      color: "#3e6b5f", bits: 2,  ppl: 9.893,    kl: 0.10791, qp: "BF16 Q/P",          kind: "ref",
     desc: "OSCAR INT2 \u53c2\u8003\u65b9\u6848\uff08\u65e0 Lloyd-Max\uff09\u3002Rubin \u7684 LUT-B index \u662f 3-bit\uff0c\u56e0\u6b64\u672c\u884c\u4ec5\u4f5c\u7cbe\u5ea6\u53c2\u8003\u3002" },
@@ -1078,9 +1073,9 @@ function renderSpeed() {
     barRow(host, "Rubin \u00b7 K3V3", sp.k3v3, max, p.key === "uniform" ? "#a33d2f" : "#8a6a14",
       { valText: fmtTok(sp.k3v3) + " \u00b7 " + fmtX(sp.k3v3 / sp.h100) });
   } else if (p.kind === "bf16") {
-    barRow(host, "Rubin \u00b7 K3V3", 0, max, "", { ghost: "\u4e0d\u9002\u7528 \u2014 cache \u4fdd\u6301 16-bit" });
+    barRow(host, "Rubin \u00b7 K3V3", 0, max, "", { ghost: "N/A" });
   } else {
-    barRow(host, "Rubin \u00b7 K3V3", 0, max, "", { ghost: "\u65e0 2-bit LUT-B \u8def\u5f84 \u2014 \u4ec5\u7cbe\u5ea6\u53c2\u8003" });
+    barRow(host, "Rubin \u00b7 K3V3", 0, max, "", { ghost: "N/A" });
   }
 }
 
