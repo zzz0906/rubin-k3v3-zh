@@ -1,0 +1,1087 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Vera Rubin 可以把 Attention 加速 30× 吗？精度模拟揭示真相</title>
+<meta name="description" content="把 3-bit LUT-B KV cache 映射到 NVIDIA Vera Rubin 的 attention：Lloyd-Max codebook 与 OSCAR rotation 的精度模拟、CUDA 13.4 编译探测，以及经 operand 修正的 roofline 估算。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;0,6..72,700;1,6..72,400;1,6..72,500&family=Noto+Sans+SC:wght@400;500;600;700&family=Noto+Serif+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #f6f4ed;
+    --surface: #fcfaf4;
+    --panel: #faf8f0;
+    --ink: #23211b;
+    --ink-2: #3d3a30;
+    --muted: #6e6a5c;
+    --faint: #97927f;
+    --line: #ddd7c4;
+    --line-2: #cfc8b2;
+    --accent: #8a6a14;
+    --accent-2: #a97f19;
+    --accent-soft: #f3edd9;
+    --red: #a33d2f;
+    --green: #3e6b48;
+    --code-bg: #2a2721;
+    --code-ink: #e8e2d2;
+    --serif: "Newsreader", "Noto Serif SC", Georgia, "Songti SC", "SimSun", serif;
+    --sans: "Inter", "Noto Sans SC", -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; scroll-padding-top: 24px; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--serif);
+    font-size: 17.5px;
+    line-height: 1.85;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  .wrap { max-width: 920px; margin: 0 auto; padding: 0 24px; }
+
+  /* ---------- header (academic style) ---------- */
+  header.paper {
+    padding: 64px 0 8px;
+    text-align: center;
+  }
+  h1.title {
+    font-family: var(--serif);
+    font-weight: 600;
+    font-size: clamp(26px, 3.3vw, 36px);
+    line-height: 1.4;
+    margin: 0 auto 10px;
+    max-width: 860px;
+    color: var(--ink);
+  }
+  h1.title .subtitle-line { display: block; font-size: .7em; font-weight: 500; color: var(--ink-2); margin-top: 6px; }
+  .authors {
+    font-family: var(--serif); font-size: 16px; color: var(--ink-2);
+    font-variant: small-caps; letter-spacing: .06em; margin: 14px 0 4px;
+  }
+  .meta { font-family: var(--serif); font-size: 14px; color: var(--muted); }
+  .meta a { color: var(--accent); text-decoration: none; border-bottom: 1px solid rgba(138,106,20,.35); }
+  .head-rule { border: 0; border-top: 1.5px solid var(--ink-2); margin: 26px auto 0; opacity: .55; }
+
+  /* ---------- figure card ---------- */
+  .fig-card {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 22px 24px 18px;
+    margin: 28px 0;
+    font-family: var(--sans);
+  }
+  .fig-head { margin-bottom: 4px; }
+  .fig-tag {
+    font-family: var(--serif); letter-spacing: .06em;
+    font-size: 14.5px; font-weight: 700; color: var(--accent); margin-right: 10px;
+  }
+  .fig-title { font-family: var(--serif); font-size: 18.5px; font-weight: 600; color: var(--ink); }
+  .fig-sub { font-size: 13px; color: var(--muted); margin: 6px 0 16px; line-height: 1.65; }
+  .fig-note { font-size: 12px; color: var(--faint); margin-top: 14px; line-height: 1.65; border-top: 1px dashed var(--line-2); padding-top: 11px; }
+  .fig-note b { color: var(--muted); }
+  .fig-note a { color: var(--muted); }
+
+  /* controls */
+  .controls { display: flex; flex-wrap: wrap; gap: 12px 26px; margin-bottom: 16px; }
+  .ctrl-label { font-size: 11px; font-weight: 600; letter-spacing: .06em; color: var(--faint); margin-bottom: 6px; }
+  .seg { display: inline-flex; flex-wrap: wrap; gap: 6px; }
+  .seg button {
+    appearance: none; cursor: pointer;
+    border: 1px solid var(--line-2); background: var(--surface); color: var(--muted);
+    font-family: var(--sans); font-size: 12.5px; font-weight: 500;
+    padding: 5px 11px; border-radius: 6px; transition: all .12s ease; white-space: nowrap;
+  }
+  .seg button:hover:not(.on) { border-color: var(--faint); color: var(--ink-2); }
+  .seg button.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 600; }
+
+  /* two-panel figure */
+  .duo { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .panel { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); padding: 15px 17px 11px; }
+  .panel-head { margin-bottom: 10px; }
+  .stat-k { font-size: 10.5px; font-weight: 600; letter-spacing: .06em; color: var(--faint); margin-bottom: 3px; }
+  .stat-v { font-family: var(--mono); font-size: 28px; font-weight: 600; color: var(--ink); font-variant-numeric: tabular-nums; line-height: 1.15; }
+  .stat-s { font-size: 12px; color: var(--muted); margin-top: 3px; }
+
+  #hxChart { width: 100%; display: block; overflow: visible; }
+  #hxChart text { font-family: var(--sans); }
+  .chart-hint { font-size: 11px; color: var(--faint); text-align: right; margin-top: 2px; }
+
+  #tip {
+    position: fixed; z-index: 100; pointer-events: none; display: none;
+    background: #2a2721; color: #efeadb; border-radius: 8px; padding: 10px 12px;
+    font-family: var(--sans); font-size: 12px; line-height: 1.55; max-width: 260px;
+    box-shadow: 0 6px 20px rgba(30,26,16,.35);
+  }
+  #tip .t-title { font-weight: 700; margin-bottom: 3px; font-size: 12.5px; }
+  #tip .t-row { display: flex; justify-content: space-between; gap: 16px; color: #c9c2ac; }
+  #tip .t-row b { color: #fff; font-family: var(--mono); font-weight: 600; }
+
+  .bar-row { display: grid; grid-template-columns: 128px 1fr; gap: 12px; align-items: center; padding: 6px 0; }
+  .bar-name { font-size: 12.5px; font-weight: 600; color: var(--ink-2); line-height: 1.3; font-family: var(--sans); }
+  .bar-track { position: relative; height: 21px; background: #eeeadb; border-radius: 4px; overflow: visible; }
+  .bar-track.na { background: repeating-linear-gradient(135deg, #efebdd 0 8px, #e6e1cf 8px 16px); }
+  .bar-ghost { position: absolute; inset: 0; display: flex; align-items: center; padding-left: 10px; font-size: 11px; font-weight: 500; color: var(--faint); }
+  .bar-fill { position: absolute; inset: 0 auto 0 0; border-radius: 4px; min-width: 3px; transition: width .35s cubic-bezier(.2,.8,.25,1); }
+  .bar-val {
+    position: absolute; top: 50%; transform: translateY(-50%);
+    font-family: var(--mono); font-size: 12px; font-weight: 600; white-space: nowrap; font-variant-numeric: tabular-nums;
+  }
+  .speed-caption { font-size: 13.5px; color: var(--ink-2); margin-top: 14px; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 10px 14px; line-height: 1.75; font-family: var(--serif); }
+  .speed-caption b { font-family: var(--mono); font-size: .92em; font-weight: 600; color: var(--accent); }
+
+  /* ---------- article ---------- */
+  article { padding: 4px 0 40px; }
+  article h2 {
+    font-family: var(--serif); font-size: 24px; font-weight: 700;
+    line-height: 1.4; margin: 52px 0 14px; color: var(--ink);
+  }
+  article h2 .idx { color: var(--accent); margin-right: 10px; }
+  article h3 { font-family: var(--serif); font-size: 19.5px; font-weight: 700; margin: 36px 0 12px; color: var(--ink); }
+  article h4 { font-family: var(--serif); font-size: 17px; font-weight: 700; margin: 28px 0 10px; color: var(--ink); }
+  article p { margin: 0 0 17px; }
+  article a { color: var(--accent); text-decoration: none; border-bottom: 1px solid rgba(138,106,20,.35); }
+  article a:hover { border-bottom-color: var(--accent); }
+  article strong { font-weight: 700; color: var(--ink); }
+  article ul, article ol { padding-left: 26px; margin: 0 0 17px; }
+  article li { margin-bottom: 6px; }
+  article code, .fig-card code {
+    font-family: var(--mono); font-size: .8em; background: #eee9d7; color: #5c4a10;
+    padding: 1.5px 5px; border-radius: 4px; font-weight: 500;
+  }
+  pre {
+    background: var(--code-bg); color: var(--code-ink); border-radius: 8px;
+    padding: 16px 20px; overflow-x: auto; margin: 0 0 20px;
+    font-family: var(--mono); font-size: 13px; line-height: 1.6;
+  }
+  pre code { background: none; color: inherit; padding: 0; font-size: inherit; }
+
+  .tldr {
+    background: var(--surface); border: 1px solid var(--line); border-top: 2.5px solid var(--accent);
+    border-radius: 6px; padding: 20px 26px; margin: 26px 0 8px;
+  }
+  .tldr h2 { margin: 0 0 12px !important; font-size: 19px !important; letter-spacing: .04em; }
+  .tldr ol { margin-bottom: 0; }
+  .tldr li { margin-bottom: 11px; }
+  .tldr li:last-child { margin-bottom: 0; }
+
+  /* booktabs-style tables */
+  .table-wrap { overflow-x: auto; margin: 0 0 20px; }
+  table.data {
+    border-collapse: collapse; width: 100%;
+    font-family: var(--sans); font-size: 13.5px;
+    border-top: 2px solid var(--ink-2); border-bottom: 2px solid var(--ink-2);
+  }
+  table.data caption {
+    caption-side: top; text-align: left; font-family: var(--serif);
+    font-size: 14px; color: var(--muted); padding: 0 0 6px;
+  }
+  table.data th {
+    text-align: left; font-size: 11.5px; font-weight: 600; letter-spacing: .04em;
+    color: var(--ink-2); padding: 9px 12px; border-bottom: 1px solid var(--ink-2);
+    white-space: nowrap; background: none;
+  }
+  table.data td { padding: 8px 12px; border-bottom: 1px solid var(--line); color: var(--ink-2); vertical-align: top; }
+  table.data tr:last-child td { border-bottom: none; }
+  table.data td.num, table.data th.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--mono); font-size: 12.5px; white-space: nowrap; }
+  table.data th.num { font-family: var(--sans); font-size: 11.5px; }
+  table.data td strong { color: var(--accent); font-weight: 700; }
+  .ok { font-family: var(--sans); font-size: 11px; font-weight: 700; letter-spacing: .05em; color: var(--green); }
+  .no { font-family: var(--sans); font-size: 11px; font-weight: 700; letter-spacing: .05em; color: var(--red); }
+
+  figure.art { margin: 24px 0; }
+  figure.art .frame { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 10px; }
+  figure.art img { width: 100%; height: auto; display: block; border-radius: 4px; }
+  figure.art figcaption { font-family: var(--serif); font-size: 14px; color: var(--muted); margin-top: 10px; line-height: 1.7; }
+  figure.art figcaption b { color: var(--ink-2); }
+
+  .callout {
+    background: var(--accent-soft); border-left: 3px solid var(--accent-2);
+    border-radius: 0 6px 6px 0;
+    padding: 13px 18px; margin: 0 0 20px; font-size: 15.5px; color: #574a22; line-height: 1.8;
+  }
+
+  .refs { font-family: var(--serif); font-size: 15.5px; }
+  .refs li { margin-bottom: 7px; }
+
+  footer {
+    border-top: 1px solid var(--line-2); margin-top: 26px; padding: 26px 0 44px;
+    font-family: var(--serif); font-size: 13.5px; color: var(--faint); line-height: 1.8;
+  }
+
+  @media (max-width: 760px) {
+    body { font-size: 16px; }
+    header.paper { padding-top: 40px; }
+    .fig-card { padding: 16px 14px 14px; }
+    .duo { grid-template-columns: 1fr; }
+    .bar-row { grid-template-columns: 1fr; gap: 4px; }
+    .bar-track { height: 20px; }
+  }
+</style>
+</head>
+<body>
+
+<header class="paper">
+  <div class="wrap">
+    <h1 class="title">Vera Rubin 可以把 Attention 加速 30× 吗？
+      <span class="subtitle-line">一次精度模拟揭示真相</span>
+    </h1>
+    <div class="authors">Zhongzhu Zhou&ensp;·&ensp;Donglin Zhuang&ensp;·&ensp;Chenfeng Xu</div>
+    <div class="meta">2026 年 8 月 7 日 &nbsp;·&nbsp; 解析估算，非 Rubin 实机测量 &nbsp;·&nbsp; <a href="https://www.zhongzhuzhou.org/rubin-k3v3/">English</a></div>
+    <hr class="head-rule">
+  </div>
+</header>
+
+<main class="wrap">
+
+  <!-- ============================== 图 1：精度 + 速度 ============================== -->
+  <section class="fig-card" id="explorer" aria-label="精度与速度交互对比">
+    <div class="fig-head">
+      <span class="fig-tag">图 1 · 交互</span>
+      <span class="fig-title">选一种 KV 方案：精度代价是什么，速度收益是什么</span>
+    </div>
+    <p class="fig-sub">
+      Qwen3-4B-Thinking-2507。左：实测 WikiText-2 PPL @ 8K；右：Rubin 上 attention-only decode 上限的解析估算
+      —— 不是实机测量。
+    </p>
+
+    <div class="controls">
+      <div class="ctrl">
+        <div class="ctrl-label">KV 位宽 · 方法</div>
+        <div class="seg" id="segPreset"></div>
+      </div>
+      <div class="ctrl">
+        <div class="ctrl-label">Decode 上下文（速度面板）</div>
+        <div class="seg" id="segCtx"></div>
+      </div>
+    </div>
+
+    <div class="duo">
+      <div class="panel">
+        <div class="panel-head">
+          <div class="stat-k">精度 — WikiText-2 PPL @ 8K ↓</div>
+          <div class="stat-v" id="hxPpl">–</div>
+          <div class="stat-s" id="hxPplSub">–</div>
+        </div>
+        <svg id="hxChart" role="img" aria-label="五种 KV 方案的对数轴 PPL 对比"></svg>
+        <div class="chart-hint">对数轴 PPL，越低越好 · 点击圆点选择</div>
+      </div>
+      <div class="panel">
+        <div class="panel-head">
+          <div class="stat-k" id="hxTokK">速度 — attention-only tok/s @ 8K</div>
+          <div class="stat-v" id="hxTok">–</div>
+          <div class="stat-s" id="hxTokSub">–</div>
+        </div>
+        <div id="hxBars"></div>
+      </div>
+    </div>
+
+    <div class="speed-caption" id="hxCaption"></div>
+
+    <div class="fig-note">
+      <b>协议。</b>PPL：WikiText-2 test，16 × 8192-token blocks；KL₅₀：相对 BF16 teacher 的 top-50 bucketed
+      forward KL（nats/token）。Lloyd-Max 与 OSCAR+LM 两行使用 Rubin 硬件 Q/P 契约（E4M3 + UE8M0 block32）；
+      uniform 与 OSCAR INT2 两行以 BF16 Q/P 测得。<b>速度。</b>针对 Qwen3-4B decode（36 层 · 32 Q / 8 KV heads ·
+      head dim 128）的 attention-only 解析 roofline：K3V3 每值存 3.125 bit 外加 BF16 窗口（8K 下约 3.63 b/val），
+      且上限已包含 B-only LUT 约束 —— MXFP8 的 M tile 固定为 128，GQA4 single-token decode 只能填 4 行，
+      算力上限被压到 273.4 TFLOP/s。不含 weights、MLP、sampling 与调度。完整消融见
+      <a href="#sec4">§4.2</a>；含 B200、执行效率区间与 byte-only 上界的完整推导见 <a href="#throughput">§4.3</a>。
+    </div>
+  </section>
+
+  <!-- ============================== 正文 ============================== -->
+  <article>
+
+    <div class="tldr" id="tldr">
+      <h2>TL;DR</h2>
+      <ol>
+        <li><strong>Rubin 提供了什么？</strong>22 TB/s 的 HBM4，以及能在矩阵乘法内部把 3-bit index 解压成
+          8 个 E4M3 数值的 LUT-B Tensor Core。</li>
+        <li><strong>Attention 怎么用它？</strong>把 <code>Kᵀ</code> 和 <code>V</code> 存成 3-bit LUT-B operand；
+          Q 和 softmax 后的 P 以 MXFP8 留在 A，两次乘法都直接消费压缩 KV。</li>
+        <li><strong>为什么不能直接用朴素 INT3？</strong>Outlier 会毁掉它：Qwen3-4B 的 8K PPL 从 9.468 暴涨到
+          1504。离线 Lloyd-Max codebook —— 加上 OSCAR rotation 和 BF16 sink/recent 窗口 —— 能拉回到约 10.4。</li>
+        <li><strong>能快多少？</strong>只算 bytes 是 H100 BF16 的 29–32×，但 LUT 只支持 B，而 MXFP8 的 M tile
+          是 128、GQA 只有 4 行：可信的 single-token 上限约 <strong>20.4×</strong>（60–80% 执行效率下
+          <strong>12.3–16.4×</strong>）。30× 只是 byte-only 上界。</li>
+      </ol>
+    </div>
+
+    <h2 id="sec1"><span class="idx">1</span>Intro：Vera Rubin 最近到底变了什么？</h2>
+
+    <h3>1.1 从“faster GPU”变成 agentic inference platform</h3>
+    <p>
+      NVIDIA 对 Rubin 的官方叙事是 agentic AI：更长 context、更多 reasoning steps、更高 decode interactivity，
+      以及 rack-scale orchestration。单张 Rubin GPU 的公开规格包括 224 SM、896 Tensor Cores、288 GB HBM4 和
+      22 TB/s HBM bandwidth；Vera Rubin NVL72 则把 72 张 GPU 连接成一个 NVLink 6 scale-up domain。
+    </p>
+    <div class="table-wrap"><table class="data">
+      <thead><tr><th>Public spec</th><th class="num">1× Rubin GPU</th><th class="num">Vera Rubin NVL72</th></tr></thead>
+      <tbody>
+        <tr><td>GPU count</td><td class="num">1</td><td class="num">72</td></tr>
+        <tr><td>HBM4 capacity</td><td class="num">288 GB</td><td class="num">20.7 TB</td></tr>
+        <tr><td>HBM bandwidth</td><td class="num">22 TB/s</td><td class="num">1,580 TB/s</td></tr>
+        <tr><td>NVFP4 inference</td><td class="num">50 PFLOP/s</td><td class="num">3,600 PFLOP/s</td></tr>
+        <tr><td>FP8/FP6 published peak</td><td class="num">17.5 PFLOP/s</td><td class="num">1,260 PFLOP/s</td></tr>
+        <tr><td>NVLink bandwidth</td><td class="num">3.6 TB/s</td><td class="num">260 TB/s switch bandwidth</td></tr>
+      </tbody>
+    </table></div>
+    <p>
+      这些数字来自 <a href="https://developer.nvidia.com/blog/inside-nvidia-rubin-gpu-architecture-powering-the-era-of-agentic-ai/">NVIDIA Rubin GPU architecture</a>
+      和 <a href="https://www.nvidia.com/en-us/data-center/vera-rubin-nvl72/">Vera Rubin NVL72 specs</a>。
+      它们是 peak specs，不等于应用可达到的 sustained performance。
+    </p>
+
+    <h3>1.2 为什么我们特别关心 KV cache？</h3>
+    <p>
+      Community 常用一句话概括 inference：<strong>prefill is compute-bound, decode is bandwidth-bound</strong>。
+      Medium 的 <a href="https://medium.com/@asheesh.goja/prefill-is-compute-decode-is-bandwidth-the-architectural-case-for-disaggregated-llm-inference-92c8b36d1a88">disaggregated inference 文章</a>用这个框架解释了为什么
+      HBM、KV movement 和 prefill/decode separation 会变得越来越重要。
+    </p>
+    <p>
+      对长 context decode，每生成一个 token，都需要重新读取历史 K/V。模型越小、context 越长、batch 越高，
+      KV traffic 越可能从配角变成主要瓶颈。因此 Rubin 的 22 TB/s HBM4 很重要；但更有意思的是，它还带来了
+      减少 bytes/value 的新 ISA。
+    </p>
+
+    <h3>1.3 CUDA 13.4 让 Rubin 从 slideware 变成可检查的软件目标</h3>
+    <p>
+      <a href="https://inferencex.semianalysis.com/blog/vera-rubin-nvl72-vs-gb200-nvl72-inference">SemiAnalysis / InferenceX</a>
+      报道了第一版公开 SM107 software stack：CUDA 13.4、PyTorch、vLLM 和 OpenAI Triton 开始加入 Rubin 支持，
+      同时披露了 3-bit programmable LUT Tensor Core。
+    </p>
+    <p>我们实际安装了 CUDA 13.4.46 Developer Preview，并使用：</p>
+    <ul>
+      <li>PTX ISA 9.4</li>
+      <li><code>sm_107a</code></li>
+      <li><code>ptxas</code></li>
+      <li><code>cuobjdump</code></li>
+      <li><code>nvdisasm</code></li>
+    </ul>
+    <p>
+      这让我们至少可以做 compile-time legality check。需要注意，vLLM 的
+      <a href="https://github.com/vllm-project/vllm/issues/49735">SM107 tracking issue</a> 仍然是 open，Triton 也只是
+      <a href="https://github.com/triton-lang/triton/commit/ab592f012f37f2c2ffc9ceda6c5b49b3c37c9036">initial Rubin support</a>；
+      software bring-up 还没有结束。
+    </p>
+
+    <h2 id="sec2"><span class="idx">2</span>最相关的新特性：3-bit programmable LUT-B</h2>
+
+    <h3>2.1 LUT-B 在做什么？</h3>
+    <p>普通 FP8 B matrix 每个值需要 8 bit。Rubin LUT-B 改为：</p>
+    <ol>
+      <li>每个位置只存一个 3-bit index；</li>
+      <li>index 从 8-entry E4M3 LUT 中选择 reconstruction value；</li>
+      <li>Tensor Core 在 <code>tcgen05.mma</code> 内部完成 lookup；</li>
+      <li>kernel 不需要先 materialize 一个 decompressed B matrix。</li>
+    </ol>
+    <p>SemiAnalysis 描述的 granule 是 <code>K=64 × N=8 = 512</code> values：</p>
+<pre><code>512 × 3-bit index = 192 bytes
+8 × E4M3 LUT      =   8 bytes
+--------------------------------
+total             = 200 bytes
+effective         = 3.125 bit/value</code></pre>
+    <p>
+      LUT 不要求 uniform spacing，因此可以放 Lloyd-Max 这种 non-uniform centroids。这也是 3-bit 仍可能保住
+      质量的关键。这些 granule 在 attention dataflow 中的位置见<a href="#fig-unified">图 2</a>。
+    </p>
+
+    <h3>2.2 CUDA 13.4 compile test 告诉了我们什么？</h3>
+    <p>我们在 clean K8s container 中 compile PTX，并检查生成的 SASS：</p>
+    <div class="table-wrap"><table class="data">
+      <thead><tr><th>Probe</th><th>Compatibility</th><th>Compiler / SASS evidence</th><th>含义</th></tr></thead>
+      <tbody>
+        <tr><td><code>sm_107a</code> target</td><td><span class="ok">SUPPORTED</span></td><td><code>ptxas</code> PASS</td><td>Rubin compile CI 可建立</td></tr>
+        <tr><td>UE5M3 conversion</td><td><span class="ok">SUPPORTED</span></td><td><code>F2FP.SATFINITE.UE5M3</code></td><td>UE5M3 datatype 本身存在</td></tr>
+        <tr><td>Dense E4M3 A × LUT-B E4M3 B</td><td><span class="ok">SUPPORTED</span></td><td><code>UTCQMMA.LUTB</code></td><td>基础 QK/PV 映射合法</td></tr>
+        <tr><td>MXFP8 block32 A × LUT-B B</td><td><span class="ok">SUPPORTED</span></td><td><code>UTCQMMA.LUTB</code> + scale TMEM</td><td>scaled Q/P 可融合</td></tr>
+        <tr><td>LUT-B collector B reuse</td><td><span class="ok">SUPPORTED</span></td><td><code>B_KEEP</code> → <code>B_REUSE</code></td><td>一个 K/V tile 可跨 GQA heads 复用</td></tr>
+        <tr><td>Sparse A × ordinary B</td><td><span class="ok">SUPPORTED</span></td><td><code>UTCQMMA</code> control</td><td>Sparse-A MMA 本身存在</td></tr>
+        <tr><td>Sparse A × LUT-B B</td><td><span class="no">UNSUPPORTED</span></td><td><code>ptxas</code> rejects <code>mma.sp...lut::b</code></td><td>sparse P 不能和 LUT-B V 同时用</td></tr>
+        <tr><td>MXFP8 + UE5M3 scale + LUT-B</td><td><span class="no">UNSUPPORTED</span></td><td>PTX 9.4 Table 69</td><td>FP8 scale 必须改用 UE8M0</td></tr>
+        <tr><td>Transposed LUT-B B</td><td><span class="no">UNSUPPORTED</span></td><td>PTX 9.4 restriction</td><td>K 必须物理存为 Kᵀ</td></tr>
+      </tbody>
+    </table></div>
+    <p>
+      PTX 9.4 规定 <code>mxf8f6f4</code> 的 block scale 为 UE8M0，而 UE5M3 scale 属于 <code>mxf4nvf4</code>。
+      因此 K3V3 attention 的 hardware-valid Q/P contract 是 <strong>E4M3 + UE8M0 block32</strong>。
+    </p>
+    <div class="callout">
+      这些 probes 证明的是 compiler acceptance 和 SASS emission，不是 Rubin runtime correctness。
+      CUDA 13.4 Developer Preview 也明确禁止用 preview performance data 表征硬件。
+    </div>
+
+    <h2 id="sec3"><span class="idx">3</span>我们做了什么：把 LUT-B 映射到 attention</h2>
+    <p>
+      Rubin LUT-B 有一条最重要的规则：<strong>它只在 MMA 内解压 matrix B</strong>。因此我们不把整个 attention
+      都压成 3-bit，而是压缩每个 decode step 都会反复读取的 cache；Q 和 P 仍作为 MXFP8 matrix A。
+    </p>
+
+    <h3>3.1 一张图看懂：GQA KV 与 MLA latent</h3>
+    <figure class="art" id="fig-unified">
+      <div class="frame">
+        <img src="assets/lutb-k3v3-unified.svg" alt="K3V3 统一图。上：共享配方——离线 Lloyd-Max codebook（可选 OSCAR rotation）把 KV 一次性打包成 3-bit LUT-B granule；decode 时执行两次 UTCQMMA.LUTB，MXFP8 Q/P 位于 A，中间是 FP32 softmax，另有 BF16 sink/recent bypass。下：GQA 压缩独立的 K 转置与 V（两套 codebook），MLA 压缩一份共享的 512 维 latent（一套 codebook 喂两次 MMA）。">
+      </div>
+      <figcaption><b>图 2.</b> 一张图看懂 K3V3。<b>上：</b>共享配方 —— 离线打包一次（Lloyd-Max codebook、可选
+      OSCAR rotation、3.125 bit/value granule、BF16 安全窗口），decode 时执行两次 <code>UTCQMMA.LUTB</code>，
+      MXFP8 Q/P 位于 A，中间保持 FP32 softmax。<b>下：</b>两种架构唯一的差别是哪份 cache 成为 operand B ——
+      GQA/MHA 压缩独立的 <code>Kᵀ</code> 和 <code>V</code>（每层两套 codebook），MLA 压缩一份共享的 512-d latent
+      （一套 codebook 喂两次 MMA）。紫色即 LUT-B 路径，虚线圈标出 lookup MMA 运行的位置。</figcaption>
+    </figure>
+    <p>两种架构走的是同一条四步路径：</p>
+    <ol>
+      <li><strong>Cache 只写一次。</strong>离线准备 codebook；token 进入低精度区域时，只保存 3-bit index 和
+        8 个 E4M3 lookup values。</li>
+      <li><strong>第一次 LUT-B MMA。</strong>MXFP8 Q 作为 A，压缩 cache 作为 B，计算 attention scores。</li>
+      <li><strong>Softmax 保持 FP32。</strong>max、exp、sum 和 normalization 不降到 INT3；得到的 P 留在片上，
+        再转成 MXFP8。</li>
+      <li><strong>第二次 LUT-B MMA。</strong>MXFP8 P 作为 A，同一类压缩 cache 作为 B，得到 attention output。</li>
+    </ol>
+    <p>差别只在“压缩哪一份 cache”：</p>
+    <ul>
+      <li><strong>GQA / MHA（Qwen、Gemma）</strong>缓存独立的 <code>Kᵀ</code> 和 <code>V</code>，所以每层有 K/V
+        两套 codebook，也可以有独立的 <code>R_k</code> / <code>R_v</code>。sink 64、recent 256 和未满 block
+        保持 BF16。</li>
+      <li><strong>MLA（Kimi K3）</strong>不展开 K/V，只缓存一份共享的 512-d latent <code>c_KV</code>，所以每层
+        只需一套 codebook 和一个 latent rotation。Kimi 的 69 个 KDA states 与 64-d RoPE suffix 保持原生精度；
+        只有 24 个 Gated-MLA layers 的 latent 进入 K3V3。</li>
+    </ul>
+
+    <h3>3.2 Attention 里具体怎么算？</h3>
+    <div class="table-wrap"><table class="data">
+      <thead><tr><th>架构</th><th>第一次乘法：算 scores</th><th>中间</th><th>第二次乘法：算 output</th></tr></thead>
+      <tbody>
+        <tr><td>GQA / MHA</td><td>MXFP8 <code>Q</code> × LUT-B <code>Kᵀ</code></td><td>FP32 softmax 得到 <code>P</code></td><td>MXFP8 <code>P</code> × LUT-B <code>V</code></td></tr>
+        <tr><td>MLA</td><td>MXFP8 absorbed <code>Q</code> × LUT-B <code>c_KVᵀ</code>，再加原生 RoPE 部分</td><td>FP32 softmax 得到 <code>P</code></td><td>MXFP8 <code>P</code> × LUT-B <code>c_KV</code>，再做 value up-projection</td></tr>
+      </tbody>
+    </table></div>
+    <p>
+      这里最重要的是：INT3 cache 不需要先解压回 HBM。Tensor Core 在 <code>UTCQMMA.LUTB</code> 内一边 lookup、
+      一边做乘法。Q/P 使用 E4M3 element + UE8M0 block32 scale；Qwen3-4B 的 GQA 还可以通过
+      <code>B_KEEP → B_REUSE</code>，让一个 K/V tile 服务 4 个 Q heads。
+    </p>
+
+    <h3>3.3 Lloyd-Max：把 8 个刻度放到真正需要的位置</h3>
+    <p>
+      3-bit 只能表示 8 个值。最简单的 uniform quantization 会把 8 个刻度等距排开；如果大多数值挤在 0 附近、
+      只有少量 outlier 很大，很多刻度会浪费在几乎没有数据的区域，0 附近反而分得太粗。
+    </p>
+    <p>Lloyd-Max 的做法很直接：</p>
+    <ol>
+      <li>在 calibration data 上先放 8 个初始中心。</li>
+      <li>每个数分给离它最近的中心。</li>
+      <li>把每组中心移动到这一组数据的平均值。</li>
+      <li>重复第 2、3 步直到基本不再变化，最后只做一次 E4M3 rounding。</li>
+    </ol>
+    <p>
+      这个过程完全离线进行。Serving 时不再迭代，只需找到最近的一个中心并保存其 3-bit index。GQA 每层分别拟合
+      K/V 两套 8-value codebook；MLA 每层只拟合 latent 的一套 codebook。
+    </p>
+
+    <h3>3.4 OSCAR：先把尖峰摊平，再交给 3-bit</h3>
+    <p>
+      Lloyd-Max 解决的是“8 个刻度放在哪里”，但如果少数维度特别大，3-bit 仍然很难表示。OSCAR 可以理解为：
+      <strong>先旋转坐标系，把集中在少数维度的尖峰摊到更多维度，再量化。</strong>
+    </p>
+    <p>具体只有三步：</p>
+    <ol>
+      <li>在 calibration data 上为每层学习一个 orthogonal rotation。</li>
+      <li>写 cache 前先 rotation，并裁掉极少数最极端的 outliers，然后用 Lloyd-Max K3V3。</li>
+      <li>在 QK/PV 的另一侧做对应变换或 inverse rotation，让原来的 attention 数学关系保持不变。</li>
+    </ol>
+    <p>
+      GQA 可以分别使用 <code>R_k</code> 和 <code>R_v</code>；MLA 因为 K/V 共享同一个 <code>c_KV</code>，只能使用
+      一个 latent rotation，并把对应变换吸收到 absorbed-query 和 value projection。最简单的记法是：
+      <strong>Lloyd-Max 调整尺子的 8 个刻度，OSCAR 先把要量的东西铺平。</strong>
+    </p>
+    <div class="callout">
+      H100 实验模拟了上述 numerical QDQ、BF16 safety window 和 FP32 softmax，但 physical cache 仍是 BF16。
+      一个由 1 个 KDA layer + 1 个 Gated-MLA layer 组成的 dummy-weight integration smoke 已完成 health check
+      和真实 generation，验证了 latent K3V3 与 Q/P kernel 的连接；它不代替完整 2.8T checkpoint 的分布式加载验证。
+      真实 Rubin 实现还需要 3-bit paged allocation、descriptor/swizzle、TMEM copy、barrier 和 fused SM107 kernel。
+    </div>
+
+    <h2 id="sec4"><span class="idx">4</span>我们 measure 了什么？</h2>
+
+    <h3>4.1 Accuracy setup</h3>
+    <div class="table-wrap"><table class="data">
+      <thead><tr><th>Item</th><th>Setting</th></tr></thead>
+      <tbody>
+        <tr><td>Primary ablation model</td><td>Qwen3-4B-Thinking-2507</td></tr>
+        <tr><td>PPL</td><td>WikiText-2 test，16 × 8192-token blocks</td></tr>
+        <tr><td>KL</td><td>BF16→quantized top-50 bucketed forward KL</td></tr>
+        <tr><td>Cross-model accuracy</td><td>GPQA Diamond full set，3 seeds</td></tr>
+        <tr><td>High-precision window</td><td>sink 64 + recent 256</td></tr>
+        <tr><td>K/V</td><td>offline per-layer Lloyd-Max E4M3 LUT</td></tr>
+        <tr><td>Q/P</td><td>E4M3 element + UE8M0 block32 scale</td></tr>
+      </tbody>
+    </table></div>
+    <p>
+      <code>KL₅₀</code> 在 16 个 WikiText blocks 各取 16 个固定位置，共 256 samples。BF16 top-50 token 各自成桶，
+      其余 vocabulary 合并成 tail bucket；因此它是 full-vocabulary KL 的 data-processing lower bound，
+      单位 nats/token。
+    </p>
+
+    <h3>4.2 Accuracy analysis</h3>
+    <p>
+      本节只比较 PPL 和 KL₅₀。PPL 衡量 sequence likelihood，KL₅₀ 则直接衡量 quantized logits 相对 BF16 teacher
+      的分布偏移。主要方案可以在<a href="#explorer">图 1</a> 中并排比较；下方表格覆盖所有测量配置。
+    </p>
+
+    <h4>4.2.1 Sink/recent ablation</h4>
+    <p>
+      固定 Qwen3-4B-Thinking-2507，并保持 Q/P 为 BF16，只改变高精度窗口。A 组使用 OSCAR + offline LM K3V3；
+      B 组使用 ordinary uniform K3V3，不使用 OSCAR 或 Lloyd-Max。每组都扫描 <code>64/256</code>、
+      <code>0/256</code>、<code>64/0</code>、<code>0/0</code>，并使用相同的 8K WikiText-2 blocks。
+    </p>
+    <div class="table-wrap"><table class="data">
+      <caption>A. OSCAR + offline LM K3V3</caption>
+      <thead><tr><th class="num">BF16 Sink</th><th class="num">BF16 Recent</th><th class="num">PPL ↓</th><th class="num">KL₅₀ ↓</th></tr></thead>
+      <tbody>
+        <tr><td class="num">64</td><td class="num">256</td><td class="num">10.453</td><td class="num">0.09482</td></tr>
+        <tr><td class="num">0</td><td class="num">256</td><td class="num">15.019</td><td class="num">0.36044</td></tr>
+        <tr><td class="num">64</td><td class="num">0</td><td class="num">10.659</td><td class="num">0.14341</td></tr>
+        <tr><td class="num">0</td><td class="num">0</td><td class="num">16.260</td><td class="num">0.44066</td></tr>
+      </tbody>
+    </table></div>
+    <div class="table-wrap"><table class="data">
+      <caption>B. Ordinary K3V3（uniform LUT，无 OSCAR、无 Lloyd-Max）</caption>
+      <thead><tr><th class="num">BF16 Sink</th><th class="num">BF16 Recent</th><th class="num">PPL ↓</th><th class="num">KL₅₀ ↓</th></tr></thead>
+      <tbody>
+        <tr><td class="num">64</td><td class="num">256</td><td class="num">1504.444</td><td class="num">5.14717</td></tr>
+        <tr><td class="num">0</td><td class="num">256</td><td class="num">1875.596</td><td class="num">5.40732</td></tr>
+        <tr><td class="num">64</td><td class="num">0</td><td class="num">1890.707</td><td class="num">5.42792</td></tr>
+        <tr><td class="num">0</td><td class="num">0</td><td class="num">2489.291</td><td class="num">5.59230</td></tr>
+      </tbody>
+    </table></div>
+    <p>
+      OSCAR + offline LM 下，保留 sink 64、去掉 recent 的影响相对有限；去掉 sink 则 PPL/KL 明显恶化。
+      ordinary uniform K3V3 在四种窗口下都已经崩溃，说明 window 无法补偿缺少 rotation 和 non-uniform codebook
+      的量化误差。
+    </p>
+
+    <h4>4.2.2 Overall measurement</h4>
+    <div class="table-wrap"><table class="data">
+      <thead><tr><th>Method</th><th class="num">BF16 Sink</th><th class="num">BF16 Recent</th><th class="num">PPL ↓</th><th class="num">KL₅₀ ↓</th></tr></thead>
+      <tbody>
+        <tr><td>BF16</td><td class="num">all</td><td class="num">all</td><td class="num"><strong>9.468</strong></td><td class="num"><strong>0.0000</strong></td></tr>
+        <tr><td>OSCAR INT2、无 LM</td><td class="num">64</td><td class="num">256</td><td class="num">9.893</td><td class="num">0.10791</td></tr>
+        <tr><td>Offline LM K3V3、无 OSCAR</td><td class="num">64</td><td class="num">256</td><td class="num"><strong>10.406</strong></td><td class="num">0.09618</td></tr>
+        <tr><td>Offline LM K3V3、无 OSCAR + FP8/UE8M0 Q/P</td><td class="num">64</td><td class="num">256</td><td class="num">10.434</td><td class="num">0.10447</td></tr>
+        <tr><td>OSCAR + offline LM K3V3 + FP8/UE8M0 P only</td><td class="num">64</td><td class="num">256</td><td class="num">10.446</td><td class="num">0.09609</td></tr>
+        <tr><td>OSCAR + offline LM K3V3</td><td class="num">64</td><td class="num">256</td><td class="num">10.453</td><td class="num"><strong>0.09482</strong></td></tr>
+        <tr><td>OSCAR + offline LM K3V3 + FP8/UE8M0 Q/P</td><td class="num">64</td><td class="num">256</td><td class="num">10.465</td><td class="num">0.10090</td></tr>
+        <tr><td>OSCAR + offline LM K3V3 + FP8/UE8M0 Q only</td><td class="num">64</td><td class="num">256</td><td class="num">10.466</td><td class="num">0.09935</td></tr>
+        <tr><td>Ordinary uniform K3V3</td><td class="num">64</td><td class="num">256</td><td class="num">1504.444</td><td class="num">5.14717</td></tr>
+      </tbody>
+    </table></div>
+    <p>
+      8K 下，no-OSCAR offline LM 的 PPL 最低（10.406），而 OSCAR + offline LM 的 KL₅₀ 最低（0.09482）；
+      两者分别优化不同目标。加入 Q/P QDQ 会小幅增加 PPL 与 KL。OSCAR INT2 的 PPL 更低，但 KL₅₀ 高于两种
+      未加 Q/P 的 K3V3。
+    </p>
+
+    <h4>4.2.3 Cross-model measurement</h4>
+    <p>
+      PPL/KL 使用 8K protocol；accuracy 使用 GPQA Diamond 三种子。Qwen3.5 是 hybrid Gated DeltaNet 模型，
+      因此 K3V3 只覆盖 10 个 full-attention layers；Gemma4 的 40 个 sliding-attention layers 使用 256-d head，
+      8 个 full-attention layers 使用 512-d head，两种 geometry 分别拟合 rotation 和 per-layer codebook。
+      Gemma4 的 PPL/KL 使用 base checkpoint，GPQA 使用 instruction-tuned checkpoint。Kimi K3 只量化 24 个
+      Gated-MLA layers 的 512-d latent，69 个 KDA states 与 64-d RoPE suffix 保持原生精度；其 native mode
+      只作为 KL₅₀ teacher。Kimi PPL 沿用 native Kimi protocol：每个 8192-token block 只计最后 2048 个 token
+      的 NLL，context 仍为完整 8K；不同模型的绝对 PPL 不应横向比较。
+    </p>
+    <div class="table-wrap"><table class="data">
+      <thead><tr><th>Model</th><th>Method</th><th class="num">PPL ↓</th><th class="num">KL₅₀ ↓</th><th class="num">GPQA ↑</th></tr></thead>
+      <tbody>
+        <tr><td>Qwen3.5-35B-A3B</td><td>OSCAR + offline LM K3V3 + FP8/UE8M0 Q/P</td><td class="num">6.127</td><td class="num"><strong>0.02295</strong></td><td class="num">82.49%</td></tr>
+        <tr><td>Qwen3.5-35B-A3B</td><td>Offline LM K3V3 + FP8/UE8M0 Q/P（无 OSCAR）</td><td class="num"><strong>6.109</strong></td><td class="num">0.02870</td><td class="num"><strong>82.83%</strong></td></tr>
+        <tr><td>Gemma4-12B</td><td>OSCAR + offline LM K3V3 + FP8/UE8M0 Q/P</td><td class="num">6.120</td><td class="num"><strong>0.04806</strong></td><td class="num">62.29%</td></tr>
+        <tr><td>Gemma4-12B</td><td>Offline LM K3V3 + FP8/UE8M0 Q/P（无 OSCAR）</td><td class="num">6.388</td><td class="num">0.07572</td><td class="num">62.29%</td></tr>
+        <tr><td>Kimi K3</td><td>OSCAR + offline LM K3V3 + FP8/UE8M0 Q/P</td><td class="num"><strong>1.564</strong></td><td class="num"><strong>0.00679</strong></td><td class="num">—</td></tr>
+        <tr><td>Kimi K3</td><td>Offline LM K3V3 + FP8/UE8M0 Q/P（无 OSCAR）</td><td class="num">1.601</td><td class="num">0.00800</td><td class="num">—</td></tr>
+      </tbody>
+    </table></div>
+    <p>
+      Kimi K3 的公开 checkpoint 是 2.8T-parameter、1.56 TB MXFP4 model。两行结果都基于 MLA latent K3V3，
+      不把 512-d latent 展开成标准 K/V 后再量化；native checkpoint 仅提供 KL teacher distribution，
+      不作为第三条结果。Latent OSCAR 把 PPL 从 1.601 降到 1.564（约 2.3%），并把 KL₅₀ 从 0.00800 降到
+      0.00679（约 15.2%）；GPQA 三种子仍需完成后再填。
+    </p>
+
+    <h3 id="throughput">4.3 Throughput：Rubin 上理论能到哪里？</h3>
+    <p>
+      先看单 GPU hardware。H100 和 B200 可以作为 bandwidth baseline，但它们没有 SM107 的
+      <code>decompress::lut::b</code>；只有 Rubin 能原生执行本文的 K3V3 LUT-B path。
+      <a href="#explorer">图 1</a> 的速度面板对应本节推导的主要上限。
+    </p>
+    <div class="table-wrap"><table class="data">
+      <thead><tr><th>GPU</th><th>Memory</th><th class="num">Capacity</th><th class="num">HBM bandwidth</th><th class="num">Dense FP8 ceiling</th><th>Native LUT-B</th></tr></thead>
+      <tbody>
+        <tr><td>H100 SXM</td><td>HBM3</td><td class="num">80 GB</td><td class="num">3.35 TB/s</td><td class="num">1.979 PFLOP/s</td><td><span class="no">No</span></td></tr>
+        <tr><td>B200 SXM</td><td>HBM3e</td><td class="num">180 GB</td><td class="num">up to 8 TB/s</td><td class="num">4.5 PFLOP/s</td><td><span class="no">No</span></td></tr>
+        <tr><td>Rubin</td><td>HBM4</td><td class="num">288 GB</td><td class="num">22 TB/s</td><td class="num">8.75 PFLOP/s assumption</td><td><span class="ok">Yes</span></td></tr>
+      </tbody>
+    </table></div>
+    <p>
+      H100 数据来自 <a href="https://www.nvidia.com/en-us/data-center/h100/">NVIDIA H100 specs</a>；B200 使用
+      <a href="https://docs.nvidia.com/enterprise-reference-architectures/hgx-ai-factory/latest/components.html">NVIDIA HGX component specs</a>
+      的 180 GB / up to 8 TB/s，以及公开 4.5 PFLOP/s dense FP8；Rubin 的 8.75 PFLOP/s 是将 17.5 PFLOP/s
+      published sparse peak 折半后的 modeling assumption。这个 peak 只有在 MMA tile 被填满时才成立；
+      single-token decode 不能直接把它当成 compute ceiling。
+    </p>
+    <p>
+      Qwen3-4B-Thinking-2507 有 36 layers、32 Q heads、8 KV heads、head dim 128。每个 decode token 的
+      attention logical FLOPs 为 <code>4 × Q_heads × head_dim × context × layers</code>。
+    </p>
+
+    <h4>4.3.1 如果三张卡都读取 BF16 KV</h4>
+    <p>BF16 KV 下 arithmetic intensity 只有 4 FLOP/B，因此三张卡都明显 HBM-bound。</p>
+    <div class="table-wrap"><table class="data">
+      <thead><tr><th>GPU</th><th class="num">8K BF16 roofline</th><th class="num">8K attention-only tok/s</th><th class="num">32K BF16 roofline</th><th class="num">32K attention-only tok/s</th></tr></thead>
+      <tbody>
+        <tr><td>H100 SXM</td><td class="num">13.4 TFLOP/s</td><td class="num">2.77K</td><td class="num">13.4 TFLOP/s</td><td class="num">0.69K</td></tr>
+        <tr><td>B200 SXM</td><td class="num">32.0 TFLOP/s</td><td class="num">6.62K</td><td class="num">32.0 TFLOP/s</td><td class="num">1.66K</td></tr>
+        <tr><td>Rubin</td><td class="num">88.0 TFLOP/s</td><td class="num">18.21K</td><td class="num">88.0 TFLOP/s</td><td class="num">4.55K</td></tr>
+      </tbody>
+    </table></div>
+    <p>
+      这里 TFLOP/s 随 context 不变，是因为 BF16 arithmetic intensity 固定；token/s 会随 context 变长而下降。
+    </p>
+
+    <h4>4.3.2 如果只按 K3V3 compressed bytes 计算</h4>
+    <p>
+      K3V3 加上 BF16 sink/recent 后，8K 的 effective storage 是 3.628 bit/value，32K 是 3.251 bit/value；
+      对应 arithmetic intensity 为 17.64 / 19.69 FLOP/B。
+    </p>
+    <div class="table-wrap"><table class="data">
+      <thead><tr><th>GPU</th><th class="num">8K compressed-byte roofline</th><th class="num">8K tok/s</th><th class="num">32K compressed-byte roofline</th><th class="num">32K tok/s</th><th>能否原生执行</th></tr></thead>
+      <tbody>
+        <tr><td>H100 SXM</td><td class="num">59.1 TFLOP/s</td><td class="num">12.23K</td><td class="num">66.0 TFLOP/s</td><td class="num">3.41K</td><td>No：需要 software unpack</td></tr>
+        <tr><td>B200 SXM</td><td class="num">141.1 TFLOP/s</td><td class="num">29.21K</td><td class="num">157.5 TFLOP/s</td><td class="num">8.15K</td><td>No：没有 LUT-B</td></tr>
+        <tr><td>Rubin</td><td class="num"><strong>388.1 TFLOP/s</strong></td><td class="num"><strong>80.32K</strong></td><td class="num"><strong>433.1 TFLOP/s</strong></td><td class="num"><strong>22.41K</strong></td><td>Yes：<code>UTCQMMA.LUTB</code></td></tr>
+      </tbody>
+    </table></div>
+    <p>
+      H100/B200 两行只是“如果 HBM 只搬这些 compressed bytes”的 normalization ceiling，不是可执行的 native
+      K3V3 performance。它们必须先用 software unpack/dequantize，实际会增加 instructions、temporary traffic
+      和 latency。Rubin 的区别是 lookup 发生在 Tensor Core MMA 内。
+    </p>
+
+    <h4>4.3.3 LUT 只能放 B：对 single-token decode 的影响</h4>
+    <p>
+      这里需要加入一个此前 byte roofline 漏掉的限制。把 decode 写成 <code>K × Qᵀ</code> /
+      <code>Vᵀ × Pᵀ</code> 时，长 KV 位于 A 的 M 方向，短 Q/P 位于 B 的 N 方向；对非常 skinny 的 GEMV，
+      这个方向更容易填满不对称的 MMA tile。但是 LUT 解压只支持 B，所以 compressed KV 必须使用
+      <code>Q × Kᵀ</code> / <code>P × V</code> 的方向。
+    </p>
+    <p>
+      这并不意味着现有 attention kernels 都把 KV 放 A。
+      <a href="https://github.com/flashinfer-ai/flashinfer/blob/main/include/flashinfer/attention/prefill.cuh">FlashInfer 的 Tensor Core path</a>
+      明确把 Q fragment 传给 MMA A、K fragment 传给 B；PV 同样把 P/score fragment 放 A、V 放 B。
+      <a href="https://tridao.me/publications/flash3/flash3.pdf">FlashAttention-3</a> 也使用这组角色，并通过
+      GQA packing、split-KV 和 V 的 in-kernel transpose 缓解 decode 问题。因此真正的限制不是“角色与所有现有
+      kernel 相反”，而是 <strong>single-token 时 A 的 M tile 塞不满</strong>。
+    </p>
+    <p>
+      PTX 的 <code>kind::mxf8f6f4</code> shape 是 <code>M=128</code>、<code>N</code> 从 8 起。Qwen3-4B 的
+      GQA ratio 是 4，所以一个共享 K/V tile 最多把 4 个 Q heads 打包成 4 行：
+    </p>
+    <div class="table-wrap"><table class="data">
+      <thead><tr><th>方向</th><th class="num">有效 tile occupancy</th><th class="num">Tile-adjusted compute cap</th><th class="num">8K roofline</th><th class="num">32K roofline</th></tr></thead>
+      <tbody>
+        <tr><td>只按 compressed bytes，不看 shape</td><td class="num">—</td><td class="num">8.75 PFLOP/s</td><td class="num">388.1 TFLOP/s</td><td class="num">433.1 TFLOP/s</td></tr>
+        <tr><td><strong>LUT-B：Q/P 在 A，KV 在 B</strong></td><td class="num">M：4 / 128 = <strong>3.125%</strong></td><td class="num"><strong>273.4 TFLOP/s</strong></td><td class="num"><strong>273.4 TFLOP/s</strong></td><td class="num"><strong>273.4 TFLOP/s</strong></td></tr>
+        <tr><td>假想 compressed-A：KV 在 A，Q/P 在 B</td><td class="num">N：4 / 8 = 50%</td><td class="num">4.375 PFLOP/s</td><td class="num">388.1 TFLOP/s</td><td class="num">433.1 TFLOP/s</td></tr>
+      </tbody>
+    </table></div>
+    <p>
+      为了检查“交换 operand 本身是否更快”，我们还在 B300 上用 padded dense-E4M3 GEMM 测了相同 logical work。
+      Q/P-as-A 与 KV-as-A 的 median latency 分别为：QK 8K <code>39.97 / 40.42 µs</code>、PV 8K
+      <code>43.71 / 46.70 µs</code>、QK 32K <code>52.42 / 53.41 µs</code>、PV 32K <code>57.95 / 57.18 µs</code>。
+      差异在约 7% 以内，而且三个 case 反而是 Q/P-as-A 更快。因此不能因为 operand 名字就直接施加巨大 penalty；
+      上表的差距来自 <strong>MXFP8 固定 M=128 时的 logical tile utilization</strong>。B300 测试使用 dense E4M3、
+      不是 Rubin LUT-B，作用是校准方向性假设，不能替代 Rubin measurement。
+    </p>
+    <p>
+      所以对 Qwen GQA4 single-token decode，B-only constraint 把 byte-only ceiling 再除以约
+      <strong>1.42× @ 8K / 1.58× @ 32K</strong>。MHA/GQA ratio 1 受影响更大；GQA ratio 8、同一 KV 上的
+      multi-token decode，或者 speculative decode <code>T≥2</code> 则能填入更多 A rows，可能重新回到
+      bandwidth-bound。
+    </p>
+    <p>
+      另一个可测试的折中是 dense E4M3 A：<code>kind::f8f6f4</code> 支持 <code>M=64</code>，Qwen GQA4 的
+      tile-adjusted cap 会升到约 546.9 TFLOP/s，足以覆盖当前 HBM roofline；代价是失去原生 UE8M0 block32
+      scaling，需要软件缩放并重新做 accuracy validation。本文目前的质量数字对应 MXFP8/UE8M0，因此不能直接
+      认领这个更高 ceiling。如果 SM107 最终存在尚未公开的 LUT-B small-M special path，这个 cap 会改变；
+      当前 public PTX 与 compile probes 不能假设它存在。
+    </p>
+
+    <h4>4.3.4 Operand-corrected practical range</h4>
+    <div class="table-wrap"><table class="data">
+      <thead><tr><th class="num">Context</th><th class="num">Effective KV bits/value</th><th class="num">Byte-only HBM roofline</th><th class="num">B-only tile-corrected ceiling</th><th class="num">Expected @ 60–80%</th><th class="num">Corrected tok/s</th><th class="num">vs Rubin BF16</th></tr></thead>
+      <tbody>
+        <tr><td class="num">8K</td><td class="num">3.628</td><td class="num">388.1 TFLOP/s</td><td class="num"><strong>273.4 TFLOP/s</strong></td><td class="num"><strong>164.1–218.8 TFLOP/s</strong></td><td class="num">56.59K</td><td class="num">3.11×</td></tr>
+        <tr><td class="num">32K</td><td class="num">3.251</td><td class="num">433.1 TFLOP/s</td><td class="num"><strong>273.4 TFLOP/s</strong></td><td class="num"><strong>164.1–218.8 TFLOP/s</strong></td><td class="num">14.15K</td><td class="num">3.11×</td></tr>
+      </tbody>
+    </table></div>
+    <p>
+      加入 operand shape 后，single-token attention-only ceiling 相对 H100 BF16 约为 <strong>20.4×</strong>，
+      相对 B200 BF16 约为 <strong>8.5×</strong>；若再按 tile-corrected ceiling 的 60–80% 估计，则分别约为
+      <strong>12.3–16.4×</strong> 和 <strong>5.1–6.8×</strong>。标题中的 30× 只在 byte-only roofline、
+      或能用 GQA/multi-token/small-M path 重新填满 Tensor Core 时成立。
+    </p>
+    <div class="callout">
+      如果完全失去 GQA B-tile reuse，8K/32K bandwidth ceiling 会降到约 97.0 / 108.3 TFLOP/s，此时又会变回
+      HBM-bound。所有 token/s 都是 attention-only ceiling，不包含 model weights、MLP、sampling、scheduler、
+      communication 和 power throttling；它们不等于 Qwen3-4B end-to-end output token/s，也不是 Rubin 实机成绩。
+    </div>
+
+    <h2 id="sec5"><span class="idx">5</span>这个故事目前说明了什么？</h2>
+    <ol>
+      <li><strong>Dense KV-on-LUT-B 没有 legality blocker，但有 decode-shape blocker。</strong>PTX 不要求 B
+        必须是 static weight；<code>Kᵀ</code> 和 <code>V</code> 可以成为动态 compressed B，但 B-only + MXFP8
+        M=128 会限制 single-token tile occupancy。</li>
+      <li><strong>Compile proof 不等于 kernel done。</strong>我们生成了 <code>UTCQMMA.LUTB</code> SASS，
+        但还没有 production PagedAttention implementation。</li>
+      <li><strong>Precision contract 必须由 ISA 决定。</strong>对 LUT-B 的 MXFP8 A operand，hardware contract
+        是 E4M3 + UE8M0 block32。</li>
+      <li><strong>Offline LM 是更真实的 serving recipe。</strong>它移除了 runtime centroid fitting，
+        只保留 index assignment。</li>
+      <li><strong>Performance 不只看 bytes。</strong>Packed layout、HBM efficiency 和 collector reuse 仍然重要，
+        但 GQA packing、multi-token decode 与 small-M path 决定 Tensor Core 能否吃到这些 bandwidth 收益。</li>
+    </ol>
+
+    <h2 id="repro">Reproducibility</h2>
+    <ul>
+      <li>Offline codebooks：<code>/shared/oscar-int3-rubin-simulate/codebooks/qwen3-4b-thinking-2507/offline-wikitext-v2/</code></li>
+      <li>PPL / KL：<code>/shared/oscar-int3-rubin-simulate/offline-v2/</code></li>
+      <li>CUDA 13.4 compile artifacts：<code>/shared/oscar-int3-rubin-simulate/analysis/rubin-isa-cuda13.4-clean/</code></li>
+      <li>Roofline calculator：<code>rotation/rubin_k3v3_roofline.py --compare-hardware</code></li>
+      <li>Compile probes：<code>rotation/rubin_compile_probes/run_compile_probes.py</code></li>
+    </ul>
+
+    <h2 id="refs">References</h2>
+    <ol class="refs">
+      <li><a href="https://developer.nvidia.com/blog/inside-nvidia-rubin-gpu-architecture-powering-the-era-of-agentic-ai/">NVIDIA: Inside NVIDIA Rubin GPU Architecture</a></li>
+      <li><a href="https://developer.nvidia.com/blog/inside-the-nvidia-rubin-platform-six-new-chips-one-ai-supercomputer/">NVIDIA: Inside the Vera Rubin Platform</a></li>
+      <li><a href="https://www.nvidia.com/en-us/data-center/vera-rubin-nvl72/">NVIDIA: Vera Rubin NVL72 specs</a></li>
+      <li><a href="https://www.nvidia.com/en-us/data-center/h100/">NVIDIA: H100 product specifications</a></li>
+      <li><a href="https://docs.nvidia.com/enterprise-reference-architectures/hgx-ai-factory/latest/components.html">NVIDIA: HGX H100/B200/B300 components</a></li>
+      <li><a href="https://inferencex.semianalysis.com/blog/vera-rubin-nvl72-vs-gb200-nvl72-inference">SemiAnalysis / InferenceX: Vera Rubin NVL72 vs GB200 NVL72</a></li>
+      <li><a href="https://medium.com/@asheesh.goja/prefill-is-compute-decode-is-bandwidth-the-architectural-case-for-disaggregated-llm-inference-92c8b36d1a88">Medium: Prefill is Compute, Decode is Bandwidth</a></li>
+      <li><a href="https://docs.nvidia.com/cuda/developer-preview/13.4/cuda-toolkit-release-notes/index.html">CUDA 13.4 Developer Preview release notes</a></li>
+      <li><a href="https://docs.nvidia.com/cuda/developer-preview/13.4/parallel-thread-execution/index.html">PTX ISA 9.4</a></li>
+      <li><a href="https://tridao.me/publications/flash3/flash3.pdf">FlashAttention-3</a></li>
+      <li><a href="https://github.com/flashinfer-ai/flashinfer/blob/main/include/flashinfer/attention/prefill.cuh">FlashInfer Tensor Core attention source</a></li>
+      <li><a href="https://github.com/triton-lang/triton/commit/ab592f012f37f2c2ffc9ceda6c5b49b3c37c9036">OpenAI Triton initial SM107 support</a></li>
+      <li><a href="https://github.com/vllm-project/vllm/issues/49735">vLLM SM107 tracking issue</a></li>
+    </ol>
+  </article>
+</main>
+
+<footer>
+  <div class="wrap">
+    所有吞吐数字均为 attention-only 的解析 roofline 上限，不是 Rubin 实机测量。精度数字是在 H100 上对
+    Rubin 精度契约的数值模拟（physical cache 仍为 BF16）。CUDA 13.4 Developer Preview 条款禁止使用
+    preview 性能数据表征硬件。
+  </div>
+</footer>
+
+<div id="tip"></div>
+
+<script>
+"use strict";
+
+/* ============================================================
+   Helpers
+   ============================================================ */
+const $ = (id) => document.getElementById(id);
+const svgNS = "http://www.w3.org/2000/svg";
+function el(tag, attrs, parent) {
+  const n = document.createElementNS(svgNS, tag);
+  if (attrs) for (const k in attrs) n.setAttribute(k, attrs[k]);
+  if (parent) parent.appendChild(n);
+  return n;
+}
+const fmtTok = (v) => {
+  if (v >= 1e6) return (v / 1e6).toFixed(2) + "M";
+  if (v >= 1e4) return (v / 1e3).toFixed(1) + "K";
+  if (v >= 1e3) return (v / 1e3).toFixed(2) + "K";
+  return Math.round(v).toString();
+};
+const fmtX = (v) => (v >= 100 ? v.toFixed(0) : v >= 10 ? v.toFixed(1) : v.toFixed(2)) + "\u00d7";
+const tip = $("tip");
+function showTip(html, x, y) {
+  tip.innerHTML = html;
+  tip.style.display = "block";
+  const r = tip.getBoundingClientRect();
+  let left = x + 14, top = y + 14;
+  if (left + r.width > window.innerWidth - 10) left = x - r.width - 14;
+  if (top + r.height > window.innerHeight - 10) top = y - r.height - 14;
+  tip.style.left = left + "px";
+  tip.style.top = top + "px";
+}
+function hideTip() { tip.style.display = "none"; }
+
+/* ============================================================
+   数据 — Qwen3-4B-Thinking-2507
+   精度：WikiText-2 test，16 x 8192-token blocks，sink 64 + recent 256。
+   Lloyd-Max / OSCAR+LM 行使用 Rubin 硬件 Q/P 契约（E4M3 + UE8M0 block32）；
+   uniform 与 INT2 行以 BF16 Q/P 测得。
+   ============================================================ */
+const BF16_PPL = 9.468;
+const PRESETS = [
+  { key: "bf16",     label: "BF16 \u00b7 16-bit",      color: "#4a463c", bits: 16, ppl: 9.468,    kl: 0.0,     qp: "\u2014",            kind: "bf16",
+    desc: "\u5168\u7cbe\u5ea6\u57fa\u7ebf \u2014\u2014 \u4e0d\u505a\u4efb\u4f55 KV \u91cf\u5316\u3002" },
+  { key: "uniform",  label: "Uniform \u00b7 3-bit",    color: "#a33d2f", bits: 3,  ppl: 1504.444, kl: 5.14717, qp: "BF16 Q/P",          kind: "k3v3",
+    desc: "8 \u4e2a\u7b49\u8ddd\u523b\u5ea6\uff0c\u65e0 rotation\u3001\u65e0\u62df\u5408 codebook \u2014\u2014 \u5373\u300c\u76f4\u63a5\u5b58 INT3\u300d\u3002\u5b83\u4f1a\u5d29\u6e83\u3002" },
+  { key: "lm",       label: "Lloyd-Max \u00b7 3-bit",  color: "#31607f", bits: 3,  ppl: 10.434,   kl: 0.10447, qp: "FP8/UE8M0 Q/P",     kind: "k3v3", hw: true,
+    desc: "\u79bb\u7ebf per-layer 8-entry E4M3 codebook \u2014\u2014 8 \u4e2a\u523b\u5ea6\u79fb\u5230\u6570\u503c\u771f\u6b63\u6240\u5728\u7684\u4f4d\u7f6e\u30023-bit \u65b9\u6848\u4e2d PPL \u6700\u4f4e\u3002" },
+  { key: "oscar_lm", label: "OSCAR+LM \u00b7 3-bit",   color: "#8a6a14", bits: 3,  ppl: 10.465,   kl: 0.10090, qp: "FP8/UE8M0 Q/P",     kind: "k3v3", hw: true,
+    desc: "OSCAR rotation + outlier clipping \u52a0\u5728 Lloyd-Max codebook \u4e4b\u524d\u3002\u4e0e BF16 teacher \u7684 KL\u2085\u2080 \u6700\u4f4e\u3002" },
+  { key: "int2",     label: "OSCAR \u00b7 2-bit",      color: "#3e6b5f", bits: 2,  ppl: 9.893,    kl: 0.10791, qp: "BF16 Q/P",          kind: "ref",
+    desc: "OSCAR INT2 \u53c2\u8003\u65b9\u6848\uff08\u65e0 Lloyd-Max\uff09\u3002Rubin \u7684 LUT-B index \u662f 3-bit\uff0c\u56e0\u6b64\u672c\u884c\u4ec5\u4f5c\u7cbe\u5ea6\u53c2\u8003\u3002" },
+];
+
+/* 速度模型（attention-only 解析 roofline，与 §4.3 一致） */
+const MODEL = { layers: 36, qHeads: 32, kvHeads: 8, headDim: 128 };
+const HI_WINDOW = 320;                       // BF16 sink 64 + recent 256
+const TILE_CAP = 8.75e15 * (4 / 128);        // 273.4 TFLOP/s：MXFP8 M=128，4 GQA rows
+const CTX_LABEL = { 8192: "8K", 32768: "32K" };
+const flopsPerTok = (ctx) => 4 * MODEL.qHeads * MODEL.headDim * ctx * MODEL.layers;
+const bf16Bytes = (ctx) => 2 * MODEL.kvHeads * MODEL.headDim * 2 * ctx * MODEL.layers;
+const effBitsCtx = (ctx) => (HI_WINDOW * 16 + (ctx - HI_WINDOW) * 3.125) / ctx;
+function speedAt(ctx) {
+  const fl = flopsPerTok(ctx);
+  const bB = bf16Bytes(ctx);
+  const bK = bB * effBitsCtx(ctx) / 16;
+  const h100 = 3.35e12 / bB;
+  const rubinBF16 = 22e12 / bB;
+  const byte = 22e12 / bK;
+  const k3v3 = Math.min(byte, TILE_CAP / fl);
+  return { fl, bB, bK, h100, rubinBF16, byte, k3v3 };
+}
+
+const hx = { preset: "oscar_lm", ctx: 8192 };
+const curPreset = () => PRESETS.find(p => p.key === hx.preset);
+
+/* ============================================================
+   渲染
+   ============================================================ */
+function seg(containerId, items, current, onPick) {
+  const c = $(containerId);
+  c.innerHTML = "";
+  items.forEach(([key, label]) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.textContent = label;
+    if (String(key) === String(current)) b.classList.add("on");
+    b.addEventListener("click", () => onPick(key));
+    c.appendChild(b);
+  });
+}
+
+function deltaText(p) {
+  if (p.key === "bf16") return "\u57fa\u7ebf";
+  const r = p.ppl / BF16_PPL;
+  return r < 2 ? "\u8f83 BF16 +" + ((r - 1) * 100).toFixed(1) + "%" : "\u8f83 BF16 \u00d7" + r.toFixed(1);
+}
+
+function renderAccuracy() {
+  const p = curPreset();
+  $("hxPpl").textContent = p.ppl.toFixed(3);
+  $("hxPpl").style.color = p.color;
+  $("hxPplSub").textContent = deltaText(p) + " \u00b7 KL\u2085\u2080 " + p.kl.toFixed(5) + " \u00b7 Q/P " + p.qp;
+  renderChart();
+}
+
+function renderChart() {
+  const svg = $("hxChart");
+  svg.innerHTML = "";
+  const width = Math.max(300, svg.parentElement.clientWidth - 36);
+  const H = 148, mL = 10, mR = 16, mT = 30, mB = 32;
+  const innerW = width - mL - mR;
+  svg.setAttribute("viewBox", "0 0 " + width + " " + H);
+  svg.style.height = H + "px";
+
+  const lo = 9, hi = 2800;
+  const X = (v) => mL + (Math.log10(v / lo) / Math.log10(hi / lo)) * innerW;
+  const plotBot = H - mB;
+
+  const ticks = [10, 15, 25, 50, 100, 250, 1000, 2500];
+  ticks.forEach(t => {
+    const x = X(t);
+    el("line", { x1: x, y1: mT - 4, x2: x, y2: plotBot, stroke: "#ece7d6", "stroke-width": 1 }, svg);
+    const lbl = el("text", { x: x, y: plotBot + 16, "text-anchor": "middle", "font-size": 10.5, fill: "#97927f", "font-weight": 600 }, svg);
+    lbl.textContent = t >= 1000 ? (t / 1000) + "k" : t;
+  });
+
+  const bx = X(BF16_PPL);
+  el("line", { x1: bx, y1: mT - 6, x2: bx, y2: plotBot, stroke: "#4a463c", "stroke-width": 1.1, "stroke-dasharray": "3 4", opacity: .5 }, svg);
+  const bl = el("text", { x: bx + 5, y: plotBot - 4, "font-size": 9.5, fill: "#97927f", "font-weight": 700 }, svg);
+  bl.textContent = "BF16";
+
+  /* 相近 PPL 的圆点上下错开 */
+  const cy = mT + (plotBot - mT) / 2;
+  const dots = PRESETS.map(p => ({ p, x: X(p.ppl), lvl: 0 }))
+    .sort((a, b) => a.x - b.x);
+  const placed = [];
+  dots.forEach(d => {
+    let lvl = 0;
+    while (placed.some(q => q.lvl === lvl && Math.abs(q.x - d.x) < 17)) lvl++;
+    d.lvl = lvl;
+    placed.push(d);
+  });
+
+  const sel = curPreset();
+  let selDot = null;
+  dots.forEach(d => {
+    const off = d.lvl === 0 ? 0 : (d.lvl % 2 === 1 ? -1 : 1) * Math.ceil(d.lvl / 2) * 16;
+    d.cy = cy + off;
+    const isSel = d.p === sel;
+    if (isSel) { selDot = d; return; }
+    drawDot(svg, d, false);
+  });
+  if (selDot) {
+    drawDot(svg, selDot, true);
+    el("circle", { cx: selDot.x, cy: selDot.cy, r: 13, fill: "none", stroke: selDot.p.color, "stroke-width": 1.6, "stroke-dasharray": "2.5 3", opacity: .85 }, svg);
+    const lblX = Math.min(Math.max(selDot.x, mL + 40), width - mR - 46);
+    const g = el("text", { x: lblX, y: mT - 10, "text-anchor": "middle", "font-size": 11.5, "font-weight": 700, fill: selDot.p.color }, svg);
+    g.textContent = selDot.p.label.split(" \u00b7")[0] + " " + selDot.p.ppl.toFixed(3);
+    el("line", { x1: selDot.x, y1: mT - 6, x2: selDot.x, y2: selDot.cy - 13, stroke: selDot.p.color, "stroke-width": 1, "stroke-dasharray": "2 3", opacity: .6 }, svg);
+  }
+}
+
+function drawDot(svg, d, isSel) {
+  const c = el("circle", {
+    cx: d.x, cy: d.cy, r: isSel ? 9 : 7,
+    fill: d.p.color, "fill-opacity": isSel ? 1 : .85,
+    stroke: "#fcfaf4", "stroke-width": isSel ? 2.5 : 1.5,
+    style: "cursor:pointer",
+  }, svg);
+  c.addEventListener("mousemove", (ev) => showTip(
+    '<div class="t-title">' + d.p.label + "</div>" +
+    '<div class="t-row"><span>PPL</span><b>' + d.p.ppl.toFixed(3) + "</b></div>" +
+    '<div class="t-row"><span>KL\u2085\u2080</span><b>' + d.p.kl.toFixed(5) + "</b></div>" +
+    '<div class="t-row"><span>Q/P</span><b>' + d.p.qp + "</b></div>",
+    ev.clientX, ev.clientY));
+  c.addEventListener("mouseleave", hideTip);
+  c.addEventListener("click", () => { hx.preset = d.p.key; hideTip(); render(); });
+}
+
+function barRow(host, name, tok, max, color, opts) {
+  const row = document.createElement("div");
+  row.className = "bar-row";
+  const label = document.createElement("div");
+  label.className = "bar-name";
+  label.textContent = name;
+  const track = document.createElement("div");
+  track.className = "bar-track";
+  if (opts && opts.ghost) {
+    track.classList.add("na");
+    const g = document.createElement("span");
+    g.className = "bar-ghost";
+    g.textContent = opts.ghost;
+    track.appendChild(g);
+  } else {
+    const pct = Math.max(1.2, tok / max * 100);
+    const fill = document.createElement("div");
+    fill.className = "bar-fill";
+    fill.style.width = pct + "%";
+    fill.style.background = "linear-gradient(90deg," + color + "d9," + color + ")";
+    const val = document.createElement("span");
+    val.className = "bar-val";
+    val.textContent = (opts && opts.valText) || fmtTok(tok) + " tok/s";
+    if (pct > 52) { val.style.right = (100 - pct) + "%"; val.style.marginRight = "10px"; val.style.color = "#faf8f0"; }
+    else { val.style.left = pct + "%"; val.style.marginLeft = "10px"; val.style.color = "#3d3a30"; }
+    track.appendChild(fill);
+    track.appendChild(val);
+  }
+  row.appendChild(label);
+  row.appendChild(track);
+  host.appendChild(row);
+}
+
+function renderSpeed() {
+  const p = curPreset();
+  const sp = speedAt(hx.ctx);
+  const ctxL = CTX_LABEL[hx.ctx];
+  $("hxTokK").textContent = "\u901f\u5ea6 \u2014 attention-only tok/s @ " + ctxL;
+
+  if (p.kind === "k3v3") {
+    $("hxTok").textContent = fmtTok(sp.k3v3);
+    $("hxTok").style.color = "#8a6a14";
+    $("hxTokSub").textContent = "Rubin K3V3 \u4e0a\u9650 \u00b7 " + fmtX(sp.k3v3 / sp.h100) + " H100 BF16 \u00b7 " + fmtX(sp.k3v3 / sp.rubinBF16) + " Rubin BF16";
+  } else if (p.kind === "bf16") {
+    $("hxTok").textContent = fmtTok(sp.rubinBF16);
+    $("hxTok").style.color = "#4a463c";
+    $("hxTokSub").textContent = "Rubin BF16 \u00b7 " + fmtX(sp.rubinBF16 / sp.h100) + " H100 \u2014 \u4ec5\u5e26\u5bbd\u6536\u76ca\uff0c\u65e0\u538b\u7f29";
+  } else {
+    $("hxTok").textContent = "\u2014";
+    $("hxTok").style.color = "#97927f";
+    $("hxTokSub").textContent = "\u4ec5\u7cbe\u5ea6\u53c2\u8003 \u2014 Rubin LUT-B \u6ca1\u6709 2-bit \u8def\u5f84";
+  }
+
+  const host = $("hxBars");
+  host.innerHTML = "";
+  const max = p.kind === "k3v3" ? sp.k3v3 : sp.rubinBF16;
+  barRow(host, "H100 \u00b7 BF16 KV", sp.h100, max, "#b3ac94", { valText: fmtTok(sp.h100) + " \u00b7 1.00\u00d7" });
+  barRow(host, "Rubin \u00b7 BF16 KV", sp.rubinBF16, max, "#6e6a5c", { valText: fmtTok(sp.rubinBF16) + " \u00b7 " + fmtX(sp.rubinBF16 / sp.h100) });
+  if (p.kind === "k3v3") {
+    barRow(host, "Rubin \u00b7 K3V3", sp.k3v3, max, p.key === "uniform" ? "#a33d2f" : "#8a6a14",
+      { valText: fmtTok(sp.k3v3) + " \u00b7 " + fmtX(sp.k3v3 / sp.h100) });
+  } else if (p.kind === "bf16") {
+    barRow(host, "Rubin \u00b7 K3V3", 0, max, "", { ghost: "\u4e0d\u9002\u7528 \u2014 cache \u4fdd\u6301 16-bit" });
+  } else {
+    barRow(host, "Rubin \u00b7 K3V3", 0, max, "", { ghost: "\u65e0 2-bit LUT-B \u8def\u5f84 \u2014 \u4ec5\u7cbe\u5ea6\u53c2\u8003" });
+  }
+}
+
+function renderCaption() {
+  const p = curPreset();
+  const sp = speedAt(hx.ctx);
+  const ctxL = CTX_LABEL[hx.ctx];
+  let html;
+  if (p.kind === "k3v3") {
+    const lo = sp.k3v3 * 0.6, hi = sp.k3v3 * 0.8;
+    html = p.desc + "\u5728 " + ctxL + " \u4e0b\uff0ctile-corrected Rubin \u4e0a\u9650\u4e3a <b>" + fmtTok(sp.k3v3) +
+      "</b> attention tok/s \u2014\u2014 \u76f8\u5f53\u4e8e H100 BF16 \u7684 " + fmtX(sp.k3v3 / sp.h100) + "\u3001Rubin BF16 \u7684 " + fmtX(sp.k3v3 / sp.rubinBF16) +
+      "\uff1b\u6309 60\u201380% \u6267\u884c\u6548\u7387\u8ba1\u4e3a <b>" + fmtTok(lo) + "\u2013" + fmtTok(hi) + "</b> tok/s\uff08" +
+      fmtX(lo / sp.h100) + "\u2013" + fmtX(hi / sp.h100) + "\uff09\u3002byte-only \u4e0a\u754c\u4e3a " + fmtTok(sp.byte) +
+      "\uff08" + fmtX(sp.byte / sp.h100) + "\uff09\u3002";
+    if (p.key === "uniform") {
+      html += " <b>\u5b57\u8282\u76f8\u540c\u3001\u901f\u5ea6\u76f8\u540c \u2014\u2014 \u4f46 PPL \u5d29\u5230\u4e86 \u00d7" + (p.ppl / BF16_PPL).toFixed(0) +
+        "\u3002</b>\u52a0\u901f\u662f\u514d\u8d39\u7684\uff0c\u7cbe\u5ea6\u65b9\u6848\u4e0d\u662f\u3002";
+    }
+  } else if (p.kind === "bf16") {
+    html = p.desc + "\u4e0d\u538b\u7f29\u65f6 Rubin \u4e5f\u80fd\u52a0\u901f attention decode \u2014\u2014 \u4f46\u53ea\u9760 HBM \u5e26\u5bbd\uff1a" + ctxL + " \u4e0b <b>" +
+      fmtTok(sp.rubinBF16) + "</b> tok/s\uff0c\u7ea6 H100 BF16 \u7684 " + fmtX(sp.rubinBF16 / sp.h100) +
+      "\u3002LUT-B Tensor Core \u5904\u4e8e\u95f2\u7f6e\u3002";
+  } else {
+    html = p.desc + "PPL 9.893\uff08\u8f83 BF16 +4.5%\uff09\u8bf4\u660e 2-bit \u4e0b\u4ec5\u9760 rotation \u80fd\u8d70\u591a\u8fdc \u2014\u2014 \u4f46 LUT-B index \u662f 3-bit \u7684\uff0c" +
+      "\u6ca1\u6709\u539f\u751f\u6267\u884c\u8def\u5f84\uff0c\u56e0\u6b64\u4e0d\u505a\u901f\u5ea6\u58f0\u660e\u3002";
+  }
+  $("hxCaption").innerHTML = html;
+}
+
+function render() {
+  seg("segPreset", PRESETS.map(p => [p.key, p.label]), hx.preset, (k) => { hx.preset = k; render(); });
+  seg("segCtx", [[8192, "8K"], [32768, "32K"]], hx.ctx, (k) => { hx.ctx = +k; render(); });
+  renderAccuracy();
+  renderSpeed();
+  renderCaption();
+}
+
+let rsz;
+window.addEventListener("resize", () => { clearTimeout(rsz); rsz = setTimeout(renderChart, 120); });
+
+render();
+</script>
+</body>
+</html>
