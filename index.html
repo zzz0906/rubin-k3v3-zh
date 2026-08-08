@@ -611,7 +611,9 @@ effective         = 3.125 bit/value</code></pre>
       Kimi K3 的公开 checkpoint 是 2.8T-parameter、1.56 TB MXFP4 model。两行结果都基于 MLA latent K3V3，
       不把 512-d latent 展开成标准 K/V 后再量化；native checkpoint 仅提供 KL teacher distribution，
       不作为第三条结果。Latent OSCAR 把 PPL 从 1.601 降到 1.564（约 2.3%），并把 KL₅₀ 从 0.00800 降到
-      0.00679（约 15.2%）；GPQA 三种子仍需完成后再填。
+      0.00679（约 15.2%）；GPQA 三种子仍需完成后再填。完整 2.8T 测量在 32 张 H100 上通过 patched SGLang
+      runtime 运行公开的 <code>moonshotai/Kimi-K3</code> checkpoint；H100 在这里是 numerical oracle ——
+      physical cache 仍会 reconstruct 成 BF16（见 <a href="#repro">Reproducibility</a>）。
     </p>
 
     <h3 id="throughput">4.3 Throughput：Rubin 上理论能到哪里？</h3>
@@ -681,12 +683,15 @@ effective         = 3.125 bit/value</code></pre>
       <code>Q × Kᵀ</code> / <code>P × V</code> 的方向。
     </p>
     <p>
-      这并不意味着现有 attention kernels 都把 KV 放 A。
-      <a href="https://github.com/flashinfer-ai/flashinfer/blob/main/include/flashinfer/attention/prefill.cuh">FlashInfer 的 Tensor Core path</a>
-      明确把 Q fragment 传给 MMA A、K fragment 传给 B；PV 同样把 P/score fragment 放 A、V 放 B。
-      <a href="https://tridao.me/publications/flash3/flash3.pdf">FlashAttention-3</a> 也使用这组角色，并通过
-      GQA packing、split-KV 和 V 的 in-kernel transpose 缓解 decode 问题。因此真正的限制不是“角色与所有现有
-      kernel 相反”，而是 <strong>single-token 时 A 的 M tile 塞不满</strong>。
+      有读者向我们指出了最新的 decode kernel，这个观察是对的：
+      <a href="https://github.com/flashinfer-ai/flashinfer/blob/b1d95851675b8799d623df4d5a7d6eac3254b3ff/flashinfer/cute_dsl/attention/gqa_decode_paged.py#L222-L259">FlashInfer SM100 CuTe GQA decode kernel</a>
+      明确设置 <code>mma_tile_m=128</code>；GEMM1 的 A 是 K、B 是 Q，GEMM2 的 A 是 V、B 是 P。它让
+      sequence/head-dim 填满 A 的 M 方向，并把 GQA heads × prediction tokens 填进 B 的 N 方向。需要同时区分
+      其他实现：FlashInfer 旧的 prefill/Tensor Core path 与
+      <a href="https://tridao.me/publications/flash3/flash3.pdf">FlashAttention-3</a> 也存在 Q/P-as-A、KV-as-B
+      的排布。因此 operand 角色不是 GQA 的数学规定，而是 kernel-specific schedule；最新的 CuTe decode kernel
+      确实选择了 KV-as-A —— 而这恰好是 LUT-B 对 compressed KV 禁止的方向。对 LUT-B 来说 Q/P 必须放 A，
+      于是问题变成 <strong>single-token decode 时 A 的 M tile 有多空</strong>。
     </p>
     <p>
       PTX 的 <code>kind::mxf8f6f4</code> shape 是 <code>M=128</code>、<code>N</code> 从 8 起。Qwen3-4B 的
@@ -697,16 +702,18 @@ effective         = 3.125 bit/value</code></pre>
       <tbody>
         <tr><td>只按 compressed bytes，不看 shape</td><td class="num">—</td><td class="num">8.75 PFLOP/s</td><td class="num">388.1 TFLOP/s</td><td class="num">433.1 TFLOP/s</td></tr>
         <tr><td><strong>LUT-B：Q/P 在 A，KV 在 B</strong></td><td class="num">M：4 / 128 = <strong>3.125%</strong></td><td class="num"><strong>273.4 TFLOP/s</strong></td><td class="num"><strong>273.4 TFLOP/s</strong></td><td class="num"><strong>273.4 TFLOP/s</strong></td></tr>
-        <tr><td>假想 compressed-A：KV 在 A，Q/P 在 B</td><td class="num">N：4 / 8 = 50%</td><td class="num">4.375 PFLOP/s</td><td class="num">388.1 TFLOP/s</td><td class="num">433.1 TFLOP/s</td></tr>
+        <tr><td>FlashInfer dense-FP8 decode：KV 在 A，Q/P 在 B</td><td class="num">N：4 / 16 = 25%</td><td class="num">2.1875 PFLOP/s</td><td class="num">388.1 TFLOP/s</td><td class="num">433.1 TFLOP/s</td></tr>
+        <tr><td>假想 Rubin compressed-A（N 最小 8）</td><td class="num">N：4 / 8 = 50%</td><td class="num">4.375 PFLOP/s</td><td class="num">388.1 TFLOP/s</td><td class="num">433.1 TFLOP/s</td></tr>
       </tbody>
     </table></div>
     <p>
-      为了检查“交换 operand 本身是否更快”，我们还在 B300 上用 padded dense-E4M3 GEMM 测了相同 logical work。
-      Q/P-as-A 与 KV-as-A 的 median latency 分别为：QK 8K <code>39.97 / 40.42 µs</code>、PV 8K
-      <code>43.71 / 46.70 µs</code>、QK 32K <code>52.42 / 53.41 µs</code>、PV 32K <code>57.95 / 57.18 µs</code>。
-      差异在约 7% 以内，而且三个 case 反而是 Q/P-as-A 更快。因此不能因为 operand 名字就直接施加巨大 penalty；
-      上表的差距来自 <strong>MXFP8 固定 M=128 时的 logical tile utilization</strong>。B300 测试使用 dense E4M3、
-      不是 Rubin LUT-B，作用是校准方向性假设，不能替代 Rubin measurement。
+      为了检查“交换 operand 本身是否总会更快”，我们还在 B300 上用普通 padded dense-E4M3 GEMM 测了相同
+      logical work。Q/P-as-A 与 KV-as-A 的 median latency 分别为：QK 8K <code>39.97 / 40.42 µs</code>、PV 8K
+      <code>43.71 / 46.70 µs</code>、QK 32K <code>52.42 / 53.41 µs</code>、PV 32K <code>57.95 / 57.18 µs</code>，
+      差异在约 7% 以内。这个 cuBLASLt microbench 不包含 FlashInfer 的 persistent decode schedule、TMEM softmax
+      pipeline 或 LUT-B，因此它只能说明“operand 名字本身”不会自动产生巨大 penalty，不能推翻 FlashInfer 对
+      M/N tile 的选择，也不能替代 Rubin measurement。上表的差距来自
+      <strong>MXFP8 固定 M=128 时的 logical tile utilization</strong>。
     </p>
     <p>
       所以对 Qwen GQA4 single-token decode，B-only constraint 把 byte-only ceiling 再除以约
@@ -757,14 +764,94 @@ effective         = 3.125 bit/value</code></pre>
         但 GQA packing、multi-token decode 与 small-M path 决定 Tensor Core 能否吃到这些 bandwidth 收益。</li>
     </ol>
 
-    <h2 id="repro">Reproducibility</h2>
-    <ul>
-      <li>Offline codebooks：<code>/shared/oscar-int3-rubin-simulate/codebooks/qwen3-4b-thinking-2507/offline-wikitext-v2/</code></li>
-      <li>PPL / KL：<code>/shared/oscar-int3-rubin-simulate/offline-v2/</code></li>
-      <li>CUDA 13.4 compile artifacts：<code>/shared/oscar-int3-rubin-simulate/analysis/rubin-isa-cuda13.4-clean/</code></li>
-      <li>Roofline calculator：<code>rotation/rubin_k3v3_roofline.py --compare-hardware</code></li>
-      <li>Compile probes：<code>rotation/rubin_compile_probes/run_compile_probes.py</code></li>
-    </ul>
+    <h2 id="repro">Reproducibility：从 OSCAR branch 开始</h2>
+    <p>
+      公开代码位于 OSCAR 的 <code>zhongzhu/oscar-int3-rubin-simulate</code> branch。下面所有路径都相对于
+      repository root，不依赖作者机器上的绝对目录：
+    </p>
+<pre><code>git clone https://github.com/FutureMLS-Lab/OSCAR.git
+cd OSCAR
+git checkout zhongzhu/oscar-int3-rubin-simulate</code></pre>
+
+    <h3>复现 ISA compile proof 与 speed tables</h3>
+    <p>
+      Roofline calculator 只使用 Python standard library，可直接重建 §4.3 的 H100/B200/Rubin 表。
+      Compile proof 需要 CUDA 13.4 Developer Preview toolchain，它会生成 PTX、CUBIN、SASS 和
+      <code>results.json</code>，并检查最终 SASS 是否包含 <code>UTCQMMA.LUTB</code>。
+      Operand-orientation microbenchmark 需要支持 FP8 的 PyTorch GPU environment；block-scaled case
+      还需要 <code>sgl_kernel</code>。
+    </p>
+<pre><code>python3 rotation/rubin_k3v3_roofline.py --compare-hardware
+
+python3 rotation/rubin_compile_probes/run_compile_probes.py \
+  --cuda /usr/local/cuda-13.4 \
+  --output /tmp/rubin-compile-probes
+
+python3 rotation/benchmark_decode_operand_orientation.py \
+  &gt; /tmp/decode-operand-orientation.json</code></pre>
+    <p>
+      这三个步骤可复现 compile legality、byte roofline、tile correction 与 dense-FP8 orientation observation，
+      但不能把它们解释成 Rubin 实机 latency。
+    </p>
+
+    <h3>复现 Kimi K3 MLA-latent K3V3 quality</h3>
+    <p>最小实现集中在 <code>rotation/kimi_k3_latent/</code>：</p>
+    <div class="table-wrap"><table class="data">
+      <thead><tr><th>File</th><th>Purpose</th></tr></thead>
+      <tbody>
+        <tr><td><code>patch_stock_runtime.py</code></td><td>给 pinned SGLang Kimi runtime 加入 latent K3V3 与 Q/P QDQ</td></tr>
+        <tr><td><code>fit_latent_codebooks.py</code></td><td>拟合 per-layer offline Lloyd-Max 与 latent OSCAR</td></tr>
+        <tr><td><code>wikitext2_kl_tail.py</code></td><td>计算 8K-context KL₅₀</td></tr>
+        <tr><td><code>run_quality_client.sh</code></td><td>执行 calibration、PPL、KL 或 GPQA</td></tr>
+        <tr><td><code>summarize_quality.py</code></td><td>合并最终两种方法的 PPL/KL/GPQA</td></tr>
+      </tbody>
+    </table></div>
+    <p>
+      先用 4 张 H100 做不读取 1.56 TB checkpoint 的两层 integration smoke
+      （<code>rotation/multimodel/k8s_kimi_k3_two_layer_smoke.yaml</code>；manifest 里的 namespace、PVC、
+      node selector 和 checkout mount 需替换为目标集群的值）。完整 2.8T run 需要 32 张 H100、
+      <code>moonshotai/Kimi-K3</code> checkpoint、共享 checkpoint/cache volume，以及同一个 branch checkout。
+      Branch 中的 manifests 按以下顺序记录了本次实验：
+    </p>
+    <ol>
+      <li><code>k8s_kimi_k3_latent_h100.yaml</code>：启动 native/calibration server。</li>
+      <li><code>k8s_kimi_k3_latent_calibration_client.yaml</code>：dump 24 个 Gated-MLA layers 的 512-d latent。</li>
+      <li><code>k8s_kimi_k3_latent_postcalibration.yaml</code>：拟合两套 codebook，并生成 native KL teacher。</li>
+      <li><code>k8s_kimi_k3_funky.yaml</code>：启动 <code>offline_lm_qp</code> 与 <code>oscar_offline_lm_qp</code> student replicas。</li>
+      <li><code>k8s_kimi_k3_funky_quality.yaml</code> 与 <code>k8s_kimi_k3_funky_gpqa.yaml</code>：运行 8K PPL/KL 和 3-seed × 4-shard GPQA。</li>
+    </ol>
+    <p>
+      如果已有兼容的 SGLang endpoints，也可以不使用这些 cluster-specific manifests，直接从 branch root 运行
+      client。<code>SOURCE</code> 必须指向 checkout，<code>BASE</code> 是结果目录，<code>BLOCKS</code> 不存在时
+      <code>rotation/wikitext2_ppl.py</code> 会用对应 tokenizer 创建 WikiText-2 8K blocks：
+    </p>
+<pre><code>export SOURCE="$PWD"
+export BASE=/path/to/results/kimi-k3
+export BLOCKS=/path/to/wikitext2_test_8192.pt
+export MODEL=moonshotai/Kimi-K3
+
+# Native endpoint：生成 KL teacher。
+BASE_URL=http://native-server:30000 \
+  TASK=kl_teacher MODE=native \
+  bash rotation/kimi_k3_latent/run_quality_client.sh
+
+# 对 MODE=offline_lm_qp 与 MODE=oscar_offline_lm_qp 重复以下两条，
+# BASE_URL 指向对应的 student server。
+BASE_URL=http://student-server:30000 \
+  TASK=ppl MODE=offline_lm_qp SKIP_CONTROL_MODE_CHECK=1 \
+  bash rotation/kimi_k3_latent/run_quality_client.sh
+BASE_URL=http://student-server:30000 \
+  TASK=kl_student MODE=offline_lm_qp SKIP_CONTROL_MODE_CHECK=1 \
+  bash rotation/kimi_k3_latent/run_quality_client.sh
+
+python3 rotation/kimi_k3_latent/summarize_quality.py \
+  --root "$BASE" \
+  --output "$BASE/summary.json"</code></pre>
+    <p>
+      H100/B200 在这里是 numerical oracle：physical cache 仍会 reconstruct 成 BF16。真实 3-bit paged
+      allocation 与 fused SM107 LUT-B kernel 必须等 Rubin hardware/software availability 后另行验证。
+      大模型 checkpoint、tokenized dataset 与运行结果体积过大，不包含在 Git branch 中。
+    </p>
 
     <h2 id="refs">References</h2>
     <ol class="refs">
@@ -778,7 +865,7 @@ effective         = 3.125 bit/value</code></pre>
       <li><a href="https://docs.nvidia.com/cuda/developer-preview/13.4/cuda-toolkit-release-notes/index.html">CUDA 13.4 Developer Preview release notes</a></li>
       <li><a href="https://docs.nvidia.com/cuda/developer-preview/13.4/parallel-thread-execution/index.html">PTX ISA 9.4</a></li>
       <li><a href="https://tridao.me/publications/flash3/flash3.pdf">FlashAttention-3</a></li>
-      <li><a href="https://github.com/flashinfer-ai/flashinfer/blob/main/include/flashinfer/attention/prefill.cuh">FlashInfer Tensor Core attention source</a></li>
+      <li><a href="https://github.com/flashinfer-ai/flashinfer/blob/b1d95851675b8799d623df4d5a7d6eac3254b3ff/flashinfer/cute_dsl/attention/gqa_decode_paged.py#L222-L259">FlashInfer SM100 CuTe GQA decode kernel</a></li>
       <li><a href="https://github.com/triton-lang/triton/commit/ab592f012f37f2c2ffc9ceda6c5b49b3c37c9036">OpenAI Triton initial SM107 support</a></li>
       <li><a href="https://github.com/vllm-project/vllm/issues/49735">vLLM SM107 tracking issue</a></li>
     </ol>
