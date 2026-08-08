@@ -37,12 +37,21 @@
     background: var(--bg);
     color: var(--ink);
     font-family: var(--serif);
-    font-size: 17.5px;
-    line-height: 1.85;
+    font-size: 16.5px;
+    line-height: 1.9;
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
   }
-  .wrap { max-width: 920px; margin: 0 auto; padding: 0 24px; }
+  .wrap { max-width: 780px; margin: 0 auto; padding: 0 24px; }
+
+  /* contents sidebar + narrow column */
+  .layout { display: grid; grid-template-columns: 200px minmax(0, 720px); gap: 48px; justify-content: center; padding: 0 24px; }
+  .toc { position: sticky; top: 36px; align-self: start; max-height: calc(100vh - 72px); overflow-y: auto; font-family: var(--sans); padding-top: 8px; }
+  .toc-title { font-family: var(--serif); font-variant: small-caps; letter-spacing: .08em; font-size: 14px; font-weight: 700; color: var(--ink-2); margin-bottom: 10px; }
+  .toc a { display: block; font-size: 12.5px; font-weight: 500; color: var(--muted); text-decoration: none; padding: 4px 10px; border-left: 2px solid var(--line); line-height: 1.5; }
+  .toc a:hover { color: var(--ink); }
+  .toc a.active { color: var(--accent); border-left-color: var(--accent); font-weight: 600; background: linear-gradient(90deg, rgba(138,106,20,.08), transparent); }
+  .toc a.sub { padding-left: 24px; font-size: 12px; }
 
   /* ---------- header (academic style) ---------- */
   header.paper {
@@ -52,7 +61,7 @@
   h1.title {
     font-family: var(--serif);
     font-weight: 600;
-    font-size: clamp(26px, 3.3vw, 36px);
+    font-size: clamp(24px, 3vw, 32px);
     line-height: 1.4;
     margin: 0 auto 10px;
     max-width: 860px;
@@ -138,12 +147,12 @@
   /* ---------- article ---------- */
   article { padding: 4px 0 40px; }
   article h2 {
-    font-family: var(--serif); font-size: 24px; font-weight: 700;
-    line-height: 1.4; margin: 52px 0 14px; color: var(--ink);
+    font-family: var(--serif); font-size: 21px; font-weight: 700;
+    line-height: 1.4; margin: 48px 0 14px; color: var(--ink);
   }
   article h2 .idx { color: var(--accent); margin-right: 10px; }
-  article h3 { font-family: var(--serif); font-size: 19.5px; font-weight: 700; margin: 36px 0 12px; color: var(--ink); }
-  article h4 { font-family: var(--serif); font-size: 17px; font-weight: 700; margin: 28px 0 10px; color: var(--ink); }
+  article h3 { font-family: var(--serif); font-size: 18px; font-weight: 700; margin: 34px 0 12px; color: var(--ink); }
+  article h4 { font-family: var(--serif); font-size: 16px; font-weight: 700; margin: 26px 0 10px; color: var(--ink); }
   article p { margin: 0 0 17px; }
   article a { color: var(--accent); text-decoration: none; border-bottom: 1px solid rgba(138,106,20,.35); }
   article a:hover { border-bottom-color: var(--accent); }
@@ -206,7 +215,7 @@
     padding: 13px 18px; margin: 0 0 20px; font-size: 15.5px; color: #574a22; line-height: 1.8;
   }
 
-  .refs { font-family: var(--serif); font-size: 15.5px; }
+  .refs { font-family: var(--serif); font-size: 14.5px; }
   .refs li { margin-bottom: 7px; }
 
   footer {
@@ -214,8 +223,12 @@
     font-family: var(--serif); font-size: 13.5px; color: var(--faint); line-height: 1.8;
   }
 
+  @media (max-width: 1080px) {
+    .layout { display: block; max-width: 780px; margin: 0 auto; }
+    .toc { display: none; }
+  }
   @media (max-width: 760px) {
-    body { font-size: 16px; }
+    body { font-size: 15.5px; }
     header.paper { padding-top: 40px; }
     .fig-card { padding: 16px 14px 14px; }
     .duo { grid-template-columns: 1fr; }
@@ -237,7 +250,22 @@
   </div>
 </header>
 
-<main class="wrap">
+<main class="layout">
+  <nav class="toc" aria-label="目录">
+    <div class="toc-title">Contents</div>
+    <a href="#explorer">图 1 · 交互</a>
+    <a href="#tldr">TL;DR</a>
+    <a href="#sec1">1&ensp;Rubin 变了什么</a>
+    <a href="#sec2">2&ensp;3-bit LUT-B</a>
+    <a href="#sec3">3&ensp;映射到 attention</a>
+    <a href="#sec4">4&ensp;测量结果</a>
+    <a class="sub" href="#accuracy">4.2&ensp;精度</a>
+    <a class="sub" href="#throughput">4.3&ensp;吞吐</a>
+    <a href="#sec5">5&ensp;结论</a>
+    <a href="#repro">Reproducibility</a>
+    <a href="#refs">References</a>
+  </nav>
+  <div class="content">
 
   <!-- ============================== 图 1：精度 + 速度 ============================== -->
   <section class="fig-card" id="explorer" aria-label="精度与速度交互对比">
@@ -388,7 +416,7 @@ total             = 200 bytes
 effective         = 3.125 bit/value</code></pre>
     <p>
       LUT 不要求 uniform spacing，因此可以放 Lloyd-Max 这种 non-uniform centroids。这也是 3-bit 仍可能保住
-      质量的关键。这些 granule 在 attention dataflow 中的位置见<a href="#fig-unified">图 2</a>。
+      质量的关键。
     </p>
 
     <h3>2.2 CUDA 13.4 compile test 告诉了我们什么？</h3>
@@ -422,17 +450,7 @@ effective         = 3.125 bit/value</code></pre>
       都压成 3-bit，而是压缩每个 decode step 都会反复读取的 cache；Q 和 P 仍作为 MXFP8 matrix A。
     </p>
 
-    <h3>3.1 一张图看懂：GQA KV 与 MLA latent</h3>
-    <figure class="art" id="fig-unified">
-      <div class="frame">
-        <img src="assets/lutb-k3v3-unified.svg" alt="K3V3 统一图。上：共享配方——离线 Lloyd-Max codebook（可选 OSCAR rotation）把 KV 一次性打包成 3-bit LUT-B granule；decode 时执行两次 UTCQMMA.LUTB，MXFP8 Q/P 位于 A，中间是 FP32 softmax，另有 BF16 sink/recent bypass。下：GQA 压缩独立的 K 转置与 V（两套 codebook），MLA 压缩一份共享的 512 维 latent（一套 codebook 喂两次 MMA）。">
-      </div>
-      <figcaption><b>图 2.</b> 一张图看懂 K3V3。<b>上：</b>共享配方 —— 离线打包一次（Lloyd-Max codebook、可选
-      OSCAR rotation、3.125 bit/value granule、BF16 安全窗口），decode 时执行两次 <code>UTCQMMA.LUTB</code>，
-      MXFP8 Q/P 位于 A，中间保持 FP32 softmax。<b>下：</b>两种架构唯一的差别是哪份 cache 成为 operand B ——
-      GQA/MHA 压缩独立的 <code>Kᵀ</code> 和 <code>V</code>（每层两套 codebook），MLA 压缩一份共享的 512-d latent
-      （一套 codebook 喂两次 MMA）。紫色即 LUT-B 路径，虚线圈标出 lookup MMA 运行的位置。</figcaption>
-    </figure>
+    <h3>3.1 GQA KV 与 MLA latent：同一条配方，两种 cache</h3>
     <p>两种架构走的是同一条四步路径：</p>
     <ol>
       <li><strong>Cache 只写一次。</strong>离线准备 codebook；token 进入低精度区域时，只保存 3-bit index 和
@@ -527,7 +545,7 @@ effective         = 3.125 bit/value</code></pre>
       单位 nats/token。
     </p>
 
-    <h3>4.2 Accuracy analysis</h3>
+    <h3 id="accuracy">4.2 Accuracy analysis</h3>
     <p>
       本节只比较 PPL 和 KL₅₀。PPL 衡量 sequence likelihood，KL₅₀ 则直接衡量 quantized logits 相对 BF16 teacher
       的分布偏移。主要方案可以在<a href="#explorer">图 1</a> 中并排比较；下方表格覆盖所有测量配置。
@@ -870,6 +888,7 @@ python3 rotation/kimi_k3_latent/summarize_quality.py \
       <li><a href="https://github.com/vllm-project/vllm/issues/49735">vLLM SM107 tracking issue</a></li>
     </ol>
   </article>
+  </div>
 </main>
 
 <footer>
@@ -1168,7 +1187,19 @@ function render() {
 let rsz;
 window.addEventListener("resize", () => { clearTimeout(rsz); rsz = setTimeout(renderChart, 120); });
 
+/* 侧边目录 scrollspy */
+const tocLinks = Array.from(document.querySelectorAll(".toc a"));
+const tocTargets = tocLinks.map(a => document.getElementById(a.getAttribute("href").slice(1))).filter(Boolean);
+function tocSpy() {
+  if (!tocTargets.length) return;
+  let cur = tocTargets[0];
+  for (const t of tocTargets) if (t.getBoundingClientRect().top <= 130) cur = t;
+  tocLinks.forEach(a => a.classList.toggle("active", a.getAttribute("href") === "#" + cur.id));
+}
+document.addEventListener("scroll", tocSpy, { passive: true });
+
 render();
+tocSpy();
 </script>
 </body>
 </html>
