@@ -464,6 +464,49 @@ effective         = 3.125 bit/value</code></pre>
         只需一套 codebook 和一个 latent rotation。Kimi 的 69 个 KDA states 与 64-d RoPE suffix 保持原生精度；
         只有 24 个 Gated-MLA layers 的 latent 进入 K3V3。</li>
     </ul>
+    <p>
+      上面提到的 <strong>BF16 sink/recent 窗口</strong>值得单独介绍，因为本文所有方案都保留它。cache 中各位置的
+      敏感度并不相同：<em>最前面的 64 个 token</em> 是 attention sink —— 会吸收不成比例注意力权重的位置；
+      <em>最近的 256 个 token</em> 则是 decode 引用最频繁的部分。这两段始终保持 BF16、不进入 3-bit 路径；
+      一个 token 只在离开 recent 窗口、且所在 512-value block 填满时，才被一次性打包进 LUT-B granule。
+      §4.2 的消融分别量化了两者的贡献；窗口与 rotation/clipping 配方沿用
+      <a href="https://arxiv.org/abs/2605.17757">OSCAR 论文</a>。
+    </p>
+    <figure class="art" id="fig-window">
+      <div class="frame">
+        <svg viewBox="0 0 1200 240" role="img" aria-label="沿 token 轴的 cache 布局：BF16 sink 与 recent 窗口包住 3-bit LUT-B 量化主体" style="width:100%;height:auto;display:block;">
+          <defs>
+            <marker id="warrV" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto" markerUnits="strokeWidth">
+              <path d="M0,0 L9,4.5 L0,9 Z" fill="#7c3aed"/>
+            </marker>
+            <marker id="warrG" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto" markerUnits="strokeWidth">
+              <path d="M0,0 L9,4.5 L0,9 Z" fill="#8a8371"/>
+            </marker>
+          </defs>
+          <text x="40" y="38" font-size="12.5" fill="#6e6a5c" font-family="Inter, 'Noto Sans SC', sans-serif">attention sink：吸收不成比例的注意力权重</text>
+          <line x1="100" y1="46" x2="100" y2="86" stroke="#b6ae95" stroke-width="1.2" stroke-dasharray="3 3"/>
+          <text x="920" y="40" font-size="12.5" font-weight="600" fill="#6d28d9" text-anchor="middle" font-family="Inter, 'Noto Sans SC', sans-serif">离开窗口时一次性打包成 3-bit granule</text>
+          <path d="M985 76 C 950 52, 890 52, 856 74" fill="none" stroke="#7c3aed" stroke-width="2.2" marker-end="url(#warrV)"/>
+          <rect x="40" y="90" width="122" height="56" rx="8" fill="#f3edd9" stroke="#a97f19" stroke-width="1.6"/>
+          <text x="101" y="114" text-anchor="middle" font-size="14.5" font-weight="700" fill="#6b520f" font-family="Inter, 'Noto Sans SC', sans-serif">sink（BF16）</text>
+          <text x="101" y="133" text-anchor="middle" font-size="11.5" fill="#8a6a14" font-family="Inter, 'Noto Sans SC', sans-serif">最前 64 个 token</text>
+          <rect x="166" y="90" width="778" height="56" rx="8" fill="#ede9fe" stroke="#7c3aed" stroke-width="1.6"/>
+          <text x="555" y="114" text-anchor="middle" font-size="15.5" font-weight="700" fill="#4c1d95" font-family="Inter, 'Noto Sans SC', sans-serif">3-bit LUT-B 主体（K3V3）</text>
+          <text x="555" y="133" text-anchor="middle" font-size="12" fill="#5b21b6" font-family="Inter, 'Noto Sans SC', sans-serif">3.125 bit/value · 写一次，每个 decode step 都读</text>
+          <rect x="948" y="90" width="212" height="56" rx="8" fill="#f3edd9" stroke="#a97f19" stroke-width="1.6"/>
+          <text x="1054" y="114" text-anchor="middle" font-size="14.5" font-weight="700" fill="#6b520f" font-family="Inter, 'Noto Sans SC', sans-serif">recent（BF16）</text>
+          <text x="1054" y="133" text-anchor="middle" font-size="11.5" fill="#8a6a14" font-family="Inter, 'Noto Sans SC', sans-serif">最近 256 个 token</text>
+          <line x1="1054" y1="150" x2="1054" y2="168" stroke="#b6ae95" stroke-width="1.2" stroke-dasharray="3 3"/>
+          <text x="1160" y="184" text-anchor="end" font-size="12.5" fill="#6e6a5c" font-family="Inter, 'Noto Sans SC', sans-serif">最热区域：每个 decode step 都会读取</text>
+          <line x1="40" y1="212" x2="1150" y2="212" stroke="#8a8371" stroke-width="1.6" marker-end="url(#warrG)"/>
+          <text x="40" y="232" font-size="12" fill="#97927f" font-family="Inter, 'Noto Sans SC', sans-serif">token 0</text>
+          <text x="1160" y="232" text-anchor="end" font-size="12" fill="#97927f" font-family="Inter, 'Noto Sans SC', sans-serif">最新 token</text>
+        </svg>
+      </div>
+      <figcaption><b>图 2.</b> 沿 token 轴的 cache 布局（段宽未按比例）。很小的 BF16 sink 和 BF16 recent 窗口
+      保护最敏感的位置；中间的主体只在离开窗口时一次性封装成 3-bit LUT-B granule。8K 上下文时这个窗口平均
+      只多花约 0.5 bit/value（3.125 → 3.63 b/val）。</figcaption>
+    </figure>
 
     <h3>3.2 Attention 里具体怎么算？</h3>
     <div class="table-wrap"><table class="data">
@@ -513,13 +556,6 @@ effective         = 3.125 bit/value</code></pre>
       一个 latent rotation，并把对应变换吸收到 absorbed-query 和 value projection。最简单的记法是：
       <strong>Lloyd-Max 调整尺子的 8 个刻度，OSCAR 先把要量的东西铺平。</strong>
     </p>
-    <p>
-      还有一个贯穿全流程的部件：<strong>BF16 sink/recent 窗口</strong>。最前面的 64 个 token 是 attention
-      sink —— 吸收了不成比例 attention 权重的位置；最近的 256 个 token 则是 decode 引用最频繁的部分。
-      这两段完全绕过量化、保持 BF16，恰好保护了 3-bit 伤害最大的数值；§4.2 的消融分别量化了两者的贡献。
-      窗口与 rotation/clipping 配方均沿用 <a href="https://arxiv.org/abs/2605.17757">OSCAR 论文</a>。
-    </p>
-
     <h2 id="sec4"><span class="idx">4</span>Accuracy simulation：K3V3 会不会损伤模型？</h2>
 
     <h3>4.1 评测设置</h3>
