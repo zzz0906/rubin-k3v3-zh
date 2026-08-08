@@ -258,10 +258,9 @@
     <a href="#sec1">1&ensp;Rubin 变了什么</a>
     <a href="#sec2">2&ensp;3-bit LUT-B</a>
     <a href="#sec3">3&ensp;映射到 attention</a>
-    <a href="#sec4">4&ensp;测量结果</a>
-    <a class="sub" href="#accuracy">4.2&ensp;精度</a>
-    <a class="sub" href="#throughput">4.3&ensp;吞吐</a>
-    <a href="#sec5">5&ensp;结论</a>
+    <a href="#sec4">4&ensp;Accuracy simulation</a>
+    <a href="#throughput">5&ensp;Speed projection</a>
+    <a href="#sec5">6&ensp;结论</a>
     <a href="#repro">Reproducibility</a>
     <a href="#refs">References</a>
   </nav>
@@ -318,7 +317,7 @@
       head dim 128）的 attention-only 解析 roofline：K3V3 每值存 3.125 bit 外加 BF16 窗口（8K 下约 3.63 b/val），
       且上限已包含 B-only LUT 约束 —— MXFP8 的 M tile 固定为 128，GQA4 single-token decode 只能填 4 行，
       算力上限被压到 273.4 TFLOP/s。不含 weights、MLP、sampling 与调度。完整消融见
-      <a href="#sec4">§4.2</a>；含 B200、执行效率区间与 byte-only 上界的完整推导见 <a href="#throughput">§4.3</a>。
+      <a href="#sec4">§4</a>；含 B200、执行效率区间与 byte-only 上界的完整推导见 <a href="#throughput">§5</a>。
     </div>
   </section>
 
@@ -524,9 +523,9 @@ effective         = 3.125 bit/value</code></pre>
       真实 Rubin 实现还需要 3-bit paged allocation、descriptor/swizzle、TMEM copy、barrier 和 fused SM107 kernel。
     </div>
 
-    <h2 id="sec4"><span class="idx">4</span>我们 measure 了什么？</h2>
+    <h2 id="sec4"><span class="idx">4</span>Accuracy simulation：K3V3 会不会损伤模型？</h2>
 
-    <h3>4.1 Accuracy setup</h3>
+    <h3>4.1 评测设置</h3>
     <div class="table-wrap"><table class="data">
       <thead><tr><th>Item</th><th>Setting</th></tr></thead>
       <tbody>
@@ -545,13 +544,11 @@ effective         = 3.125 bit/value</code></pre>
       单位 nats/token。
     </p>
 
-    <h3 id="accuracy">4.2 Accuracy analysis</h3>
+    <h3 id="accuracy">4.2 Sink/recent ablation</h3>
     <p>
       本节只比较 PPL 和 KL₅₀。PPL 衡量 sequence likelihood，KL₅₀ 则直接衡量 quantized logits 相对 BF16 teacher
       的分布偏移。主要方案可以在<a href="#explorer">图 1</a> 中并排比较；下方表格覆盖所有测量配置。
     </p>
-
-    <h4>4.2.1 Sink/recent ablation</h4>
     <p>
       固定 Qwen3-4B-Thinking-2507，并保持 Q/P 为 BF16，只改变高精度窗口。A 组使用 OSCAR + offline LM K3V3；
       B 组使用 ordinary uniform K3V3，不使用 OSCAR 或 Lloyd-Max。每组都扫描 <code>64/256</code>、
@@ -583,7 +580,7 @@ effective         = 3.125 bit/value</code></pre>
       的量化误差。
     </p>
 
-    <h4>4.2.2 Overall measurement</h4>
+    <h3>4.3 Overall measurement</h3>
     <div class="table-wrap"><table class="data">
       <thead><tr><th>Method</th><th class="num">BF16 Sink</th><th class="num">BF16 Recent</th><th class="num">PPL ↓</th><th class="num">KL₅₀ ↓</th></tr></thead>
       <tbody>
@@ -604,7 +601,7 @@ effective         = 3.125 bit/value</code></pre>
       未加 Q/P 的 K3V3。
     </p>
 
-    <h4>4.2.3 Cross-model measurement</h4>
+    <h3>4.4 Cross-model measurement</h3>
     <p>
       PPL/KL 使用 8K protocol；accuracy 使用 GPQA Diamond 三种子。Qwen3.5 是 hybrid Gated DeltaNet 模型，
       因此 K3V3 只覆盖 10 个 full-attention layers；Gemma4 的 40 个 sliding-attention layers 使用 256-d head，
@@ -634,7 +631,9 @@ effective         = 3.125 bit/value</code></pre>
       physical cache 仍会 reconstruct 成 BF16（见 <a href="#repro">Reproducibility</a>）。
     </p>
 
-    <h3 id="throughput">4.3 Throughput：Rubin 上理论能到哪里？</h3>
+    <h2 id="throughput"><span class="idx">5</span>Speed projection：Rubin 上理论能到哪里？</h2>
+
+    <h3>5.1 Hardware baseline</h3>
     <p>
       先看单 GPU hardware。H100 和 B200 可以作为 bandwidth baseline，但它们没有 SM107 的
       <code>decompress::lut::b</code>；只有 Rubin 能原生执行本文的 K3V3 LUT-B path。
@@ -660,7 +659,7 @@ effective         = 3.125 bit/value</code></pre>
       attention logical FLOPs 为 <code>4 × Q_heads × head_dim × context × layers</code>。
     </p>
 
-    <h4>4.3.1 如果三张卡都读取 BF16 KV</h4>
+    <h3>5.2 如果三张卡都读取 BF16 KV</h3>
     <p>BF16 KV 下 arithmetic intensity 只有 4 FLOP/B，因此三张卡都明显 HBM-bound。</p>
     <div class="table-wrap"><table class="data">
       <thead><tr><th>GPU</th><th class="num">8K BF16 roofline</th><th class="num">8K attention-only tok/s</th><th class="num">32K BF16 roofline</th><th class="num">32K attention-only tok/s</th></tr></thead>
@@ -674,7 +673,7 @@ effective         = 3.125 bit/value</code></pre>
       这里 TFLOP/s 随 context 不变，是因为 BF16 arithmetic intensity 固定；token/s 会随 context 变长而下降。
     </p>
 
-    <h4>4.3.2 如果只按 K3V3 compressed bytes 计算</h4>
+    <h3>5.3 如果只按 K3V3 compressed bytes 计算</h3>
     <p>
       K3V3 加上 BF16 sink/recent 后，8K 的 effective storage 是 3.628 bit/value，32K 是 3.251 bit/value；
       对应 arithmetic intensity 为 17.64 / 19.69 FLOP/B。
@@ -693,7 +692,7 @@ effective         = 3.125 bit/value</code></pre>
       和 latency。Rubin 的区别是 lookup 发生在 Tensor Core MMA 内。
     </p>
 
-    <h4>4.3.3 LUT 只能放 B：对 single-token decode 的影响</h4>
+    <h3>5.4 LUT 只能放 B：对 single-token decode 的影响</h3>
     <p>
       这里需要加入一个此前 byte roofline 漏掉的限制。把 decode 写成 <code>K × Qᵀ</code> /
       <code>Vᵀ × Pᵀ</code> 时，长 KV 位于 A 的 M 方向，短 Q/P 位于 B 的 N 方向；对非常 skinny 的 GEMV，
@@ -747,7 +746,7 @@ effective         = 3.125 bit/value</code></pre>
       当前 public PTX 与 compile probes 不能假设它存在。
     </p>
 
-    <h4>4.3.4 Operand-corrected practical range</h4>
+    <h3>5.5 Operand-corrected practical range</h3>
     <div class="table-wrap"><table class="data">
       <thead><tr><th class="num">Context</th><th class="num">Effective KV bits/value</th><th class="num">Byte-only HBM roofline</th><th class="num">B-only tile-corrected ceiling</th><th class="num">Expected @ 60–80%</th><th class="num">Corrected tok/s</th><th class="num">vs Rubin BF16</th></tr></thead>
       <tbody>
@@ -767,7 +766,7 @@ effective         = 3.125 bit/value</code></pre>
       communication 和 power throttling；它们不等于 Qwen3-4B end-to-end output token/s，也不是 Rubin 实机成绩。
     </div>
 
-    <h2 id="sec5"><span class="idx">5</span>这个故事目前说明了什么？</h2>
+    <h2 id="sec5"><span class="idx">6</span>这个故事目前说明了什么？</h2>
     <ol>
       <li><strong>Dense KV-on-LUT-B 没有 legality blocker，但有 decode-shape blocker。</strong>PTX 不要求 B
         必须是 static weight；<code>Kᵀ</code> 和 <code>V</code> 可以成为动态 compressed B，但 B-only + MXFP8
@@ -782,93 +781,28 @@ effective         = 3.125 bit/value</code></pre>
         但 GQA packing、multi-token decode 与 small-M path 决定 Tensor Core 能否吃到这些 bandwidth 收益。</li>
     </ol>
 
-    <h2 id="repro">Reproducibility：从 OSCAR branch 开始</h2>
-    <p>
-      公开代码位于 OSCAR 的 <code>zhongzhu/oscar-int3-rubin-simulate</code> branch。下面所有路径都相对于
-      repository root，不依赖作者机器上的绝对目录：
-    </p>
-<pre><code>git clone https://github.com/FutureMLS-Lab/OSCAR.git
-cd OSCAR
+    <h2 id="repro">Reproducibility</h2>
+    <p>全部从公开的 OSCAR branch 运行，所有路径相对于 repository root：</p>
+<pre><code>git clone https://github.com/FutureMLS-Lab/OSCAR.git &amp;&amp; cd OSCAR
 git checkout zhongzhu/oscar-int3-rubin-simulate</code></pre>
-
-    <h3>复现 ISA compile proof 与 speed tables</h3>
+    <ul>
+      <li><strong>Speed tables（§5）：</strong><code>python3 rotation/rubin_k3v3_roofline.py --compare-hardware</code>
+        —— 只依赖 Python 标准库。</li>
+      <li><strong>ISA compile proof：</strong><code>rotation/rubin_compile_probes/run_compile_probes.py
+        --cuda /usr/local/cuda-13.4</code> —— 需要 CUDA 13.4 preview toolchain；校验生成的 SASS 包含
+        <code>UTCQMMA.LUTB</code>。</li>
+      <li><strong>Operand-orientation microbench：</strong>
+        <code>rotation/benchmark_decode_operand_orientation.py</code> —— 需要支持 FP8 的 PyTorch GPU；
+        block-scaled case 另需 <code>sgl_kernel</code>。</li>
+      <li><strong>Kimi K3 latent K3V3 quality：</strong>实现全部集中在 <code>rotation/kimi_k3_latent/</code>
+        （runtime patch、codebook 拟合、PPL/KL/GPQA client 与汇总）。先跑 4×H100 两层 smoke
+        （<code>rotation/multimodel/k8s_kimi_k3_two_layer_smoke.yaml</code>）；完整 2.8T run 需要 32 张 H100，
+        按 <code>rotation/multimodel/</code> 中带编号的 manifests 依次执行，或把
+        <code>run_quality_client.sh</code> 直接指向兼容的 SGLang endpoints。</li>
+    </ul>
     <p>
-      Roofline calculator 只使用 Python standard library，可直接重建 §4.3 的 H100/B200/Rubin 表。
-      Compile proof 需要 CUDA 13.4 Developer Preview toolchain，它会生成 PTX、CUBIN、SASS 和
-      <code>results.json</code>，并检查最终 SASS 是否包含 <code>UTCQMMA.LUTB</code>。
-      Operand-orientation microbenchmark 需要支持 FP8 的 PyTorch GPU environment；block-scaled case
-      还需要 <code>sgl_kernel</code>。
-    </p>
-<pre><code>python3 rotation/rubin_k3v3_roofline.py --compare-hardware
-
-python3 rotation/rubin_compile_probes/run_compile_probes.py \
-  --cuda /usr/local/cuda-13.4 \
-  --output /tmp/rubin-compile-probes
-
-python3 rotation/benchmark_decode_operand_orientation.py \
-  &gt; /tmp/decode-operand-orientation.json</code></pre>
-    <p>
-      这三个步骤可复现 compile legality、byte roofline、tile correction 与 dense-FP8 orientation observation，
-      但不能把它们解释成 Rubin 实机 latency。
-    </p>
-
-    <h3>复现 Kimi K3 MLA-latent K3V3 quality</h3>
-    <p>最小实现集中在 <code>rotation/kimi_k3_latent/</code>：</p>
-    <div class="table-wrap"><table class="data">
-      <thead><tr><th>File</th><th>Purpose</th></tr></thead>
-      <tbody>
-        <tr><td><code>patch_stock_runtime.py</code></td><td>给 pinned SGLang Kimi runtime 加入 latent K3V3 与 Q/P QDQ</td></tr>
-        <tr><td><code>fit_latent_codebooks.py</code></td><td>拟合 per-layer offline Lloyd-Max 与 latent OSCAR</td></tr>
-        <tr><td><code>wikitext2_kl_tail.py</code></td><td>计算 8K-context KL₅₀</td></tr>
-        <tr><td><code>run_quality_client.sh</code></td><td>执行 calibration、PPL、KL 或 GPQA</td></tr>
-        <tr><td><code>summarize_quality.py</code></td><td>合并最终两种方法的 PPL/KL/GPQA</td></tr>
-      </tbody>
-    </table></div>
-    <p>
-      先用 4 张 H100 做不读取 1.56 TB checkpoint 的两层 integration smoke
-      （<code>rotation/multimodel/k8s_kimi_k3_two_layer_smoke.yaml</code>；manifest 里的 namespace、PVC、
-      node selector 和 checkout mount 需替换为目标集群的值）。完整 2.8T run 需要 32 张 H100、
-      <code>moonshotai/Kimi-K3</code> checkpoint、共享 checkpoint/cache volume，以及同一个 branch checkout。
-      Branch 中的 manifests 按以下顺序记录了本次实验：
-    </p>
-    <ol>
-      <li><code>k8s_kimi_k3_latent_h100.yaml</code>：启动 native/calibration server。</li>
-      <li><code>k8s_kimi_k3_latent_calibration_client.yaml</code>：dump 24 个 Gated-MLA layers 的 512-d latent。</li>
-      <li><code>k8s_kimi_k3_latent_postcalibration.yaml</code>：拟合两套 codebook，并生成 native KL teacher。</li>
-      <li><code>k8s_kimi_k3_funky.yaml</code>：启动 <code>offline_lm_qp</code> 与 <code>oscar_offline_lm_qp</code> student replicas。</li>
-      <li><code>k8s_kimi_k3_funky_quality.yaml</code> 与 <code>k8s_kimi_k3_funky_gpqa.yaml</code>：运行 8K PPL/KL 和 3-seed × 4-shard GPQA。</li>
-    </ol>
-    <p>
-      如果已有兼容的 SGLang endpoints，也可以不使用这些 cluster-specific manifests，直接从 branch root 运行
-      client。<code>SOURCE</code> 必须指向 checkout，<code>BASE</code> 是结果目录，<code>BLOCKS</code> 不存在时
-      <code>rotation/wikitext2_ppl.py</code> 会用对应 tokenizer 创建 WikiText-2 8K blocks：
-    </p>
-<pre><code>export SOURCE="$PWD"
-export BASE=/path/to/results/kimi-k3
-export BLOCKS=/path/to/wikitext2_test_8192.pt
-export MODEL=moonshotai/Kimi-K3
-
-# Native endpoint：生成 KL teacher。
-BASE_URL=http://native-server:30000 \
-  TASK=kl_teacher MODE=native \
-  bash rotation/kimi_k3_latent/run_quality_client.sh
-
-# 对 MODE=offline_lm_qp 与 MODE=oscar_offline_lm_qp 重复以下两条，
-# BASE_URL 指向对应的 student server。
-BASE_URL=http://student-server:30000 \
-  TASK=ppl MODE=offline_lm_qp SKIP_CONTROL_MODE_CHECK=1 \
-  bash rotation/kimi_k3_latent/run_quality_client.sh
-BASE_URL=http://student-server:30000 \
-  TASK=kl_student MODE=offline_lm_qp SKIP_CONTROL_MODE_CHECK=1 \
-  bash rotation/kimi_k3_latent/run_quality_client.sh
-
-python3 rotation/kimi_k3_latent/summarize_quality.py \
-  --root "$BASE" \
-  --output "$BASE/summary.json"</code></pre>
-    <p>
-      H100/B200 在这里是 numerical oracle：physical cache 仍会 reconstruct 成 BF16。真实 3-bit paged
-      allocation 与 fused SM107 LUT-B kernel 必须等 Rubin hardware/software availability 后另行验证。
-      大模型 checkpoint、tokenized dataset 与运行结果体积过大，不包含在 Git branch 中。
+      H100/B200 仅作 numerical oracle —— physical cache 仍会 reconstruct 成 BF16，这里没有任何 Rubin 实机
+      latency。大模型 checkpoint、数据集与运行结果不入 branch。
     </p>
 
     <h2 id="refs">References</h2>
@@ -955,7 +889,7 @@ const PRESETS = [
     desc: "OSCAR INT2 \u53c2\u8003\u65b9\u6848\uff08\u65e0 Lloyd-Max\uff09\u3002Rubin \u7684 LUT-B index \u662f 3-bit\uff0c\u56e0\u6b64\u672c\u884c\u4ec5\u4f5c\u7cbe\u5ea6\u53c2\u8003\u3002" },
 ];
 
-/* 速度模型（attention-only 解析 roofline，与 §4.3 一致） */
+/* 速度模型（attention-only 解析 roofline，与 §5 一致） */
 const MODEL = { layers: 36, qHeads: 32, kvHeads: 8, headDim: 128 };
 const HI_WINDOW = 320;                       // BF16 sink 64 + recent 256
 const TILE_CAP = 8.75e15 * (4 / 128);        // 273.4 TFLOP/s：MXFP8 M=128，4 GQA rows
