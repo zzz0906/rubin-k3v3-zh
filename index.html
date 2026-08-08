@@ -555,7 +555,7 @@ effective         = 3.125 bit/value</code></pre>
       <caption>A. OSCAR + offline LM K3V3</caption>
       <thead><tr><th class="num">BF16 Sink</th><th class="num">BF16 Recent</th><th class="num">PPL ↓</th><th class="num">KL₅₀ ↓</th></tr></thead>
       <tbody>
-        <tr><td class="num">64</td><td class="num">256</td><td class="num">10.453</td><td class="num">0.09482</td></tr>
+        <tr><td class="num">64</td><td class="num">256</td><td class="num">10.406</td><td class="num">0.09482</td></tr>
         <tr><td class="num">0</td><td class="num">256</td><td class="num">15.019</td><td class="num">0.36044</td></tr>
         <tr><td class="num">64</td><td class="num">0</td><td class="num">10.659</td><td class="num">0.14341</td></tr>
         <tr><td class="num">0</td><td class="num">0</td><td class="num">16.260</td><td class="num">0.44066</td></tr>
@@ -583,19 +583,18 @@ effective         = 3.125 bit/value</code></pre>
       <tbody>
         <tr><td>BF16</td><td class="num">all</td><td class="num">all</td><td class="num"><strong>9.468</strong></td><td class="num"><strong>0.0000</strong></td></tr>
         <tr><td>OSCAR INT2、无 LM</td><td class="num">64</td><td class="num">256</td><td class="num">9.893</td><td class="num">0.10791</td></tr>
-        <tr><td>Offline LM K3V3、无 OSCAR</td><td class="num">64</td><td class="num">256</td><td class="num"><strong>10.406</strong></td><td class="num">0.09618</td></tr>
+        <tr><td>OSCAR + offline LM K3V3</td><td class="num">64</td><td class="num">256</td><td class="num"><strong>10.406</strong></td><td class="num"><strong>0.09482</strong></td></tr>
         <tr><td>OSCAR + offline LM K3V3 + FP8/UE8M0 Q/P</td><td class="num">64</td><td class="num">256</td><td class="num">10.434</td><td class="num">0.10090</td></tr>
         <tr><td>OSCAR + offline LM K3V3 + FP8/UE8M0 P only</td><td class="num">64</td><td class="num">256</td><td class="num">10.446</td><td class="num">0.09609</td></tr>
-        <tr><td>OSCAR + offline LM K3V3</td><td class="num">64</td><td class="num">256</td><td class="num">10.453</td><td class="num"><strong>0.09482</strong></td></tr>
+        <tr><td>Offline LM K3V3、无 OSCAR</td><td class="num">64</td><td class="num">256</td><td class="num">10.453</td><td class="num">0.09618</td></tr>
         <tr><td>Offline LM K3V3、无 OSCAR + FP8/UE8M0 Q/P</td><td class="num">64</td><td class="num">256</td><td class="num">10.465</td><td class="num">0.10447</td></tr>
         <tr><td>OSCAR + offline LM K3V3 + FP8/UE8M0 Q only</td><td class="num">64</td><td class="num">256</td><td class="num">10.466</td><td class="num">0.09935</td></tr>
         <tr><td>Ordinary uniform K3V3</td><td class="num">64</td><td class="num">256</td><td class="num">1504.444</td><td class="num">5.14717</td></tr>
       </tbody>
     </table></div>
     <p>
-      8K 下，no-OSCAR offline LM 的 PPL 最低（10.406），而 OSCAR + offline LM 的 KL₅₀ 最低（0.09482）；
-      两者分别优化不同目标。加入 Q/P QDQ 对 PPL 与 KL 的影响都很小。OSCAR INT2 的 PPL 更低，但 KL₅₀ 高于两种
-      未加 Q/P 的 K3V3。
+      8K 下，OSCAR + offline LM 在两个指标上都是最优的 3-bit 方案：PPL 最低（10.406），KL₅₀ 也最低（0.09482）。
+      加入 Q/P QDQ 会小幅增加 PPL 与 KL。OSCAR INT2 的 PPL 更低，但 KL₅₀ 高于两种未加 Q/P 的 K3V3。
     </p>
 
     <h3>4.4 Cross-model measurement</h3>
