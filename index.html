@@ -474,38 +474,14 @@ effective         = 3.125 bit/value</code></pre>
     </p>
     <figure class="art" id="fig-window">
       <div class="frame">
-        <svg viewBox="0 0 1200 240" role="img" aria-label="沿 token 轴的 cache 布局：BF16 sink 与 recent 窗口包住 3-bit LUT-B 量化主体" style="width:100%;height:auto;display:block;">
-          <defs>
-            <marker id="warrV" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto" markerUnits="strokeWidth">
-              <path d="M0,0 L9,4.5 L0,9 Z" fill="#7c3aed"/>
-            </marker>
-            <marker id="warrG" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto" markerUnits="strokeWidth">
-              <path d="M0,0 L9,4.5 L0,9 Z" fill="#8a8371"/>
-            </marker>
-          </defs>
-          <text x="40" y="38" font-size="12.5" fill="#6e6a5c" font-family="Inter, 'Noto Sans SC', sans-serif">attention sink：吸收不成比例的注意力权重</text>
-          <line x1="100" y1="46" x2="100" y2="86" stroke="#b6ae95" stroke-width="1.2" stroke-dasharray="3 3"/>
-          <text x="920" y="40" font-size="12.5" font-weight="600" fill="#6d28d9" text-anchor="middle" font-family="Inter, 'Noto Sans SC', sans-serif">离开窗口时一次性打包成 3-bit granule</text>
-          <path d="M985 76 C 950 52, 890 52, 856 74" fill="none" stroke="#7c3aed" stroke-width="2.2" marker-end="url(#warrV)"/>
-          <rect x="40" y="90" width="122" height="56" rx="8" fill="#f3edd9" stroke="#a97f19" stroke-width="1.6"/>
-          <text x="101" y="114" text-anchor="middle" font-size="14.5" font-weight="700" fill="#6b520f" font-family="Inter, 'Noto Sans SC', sans-serif">sink（BF16）</text>
-          <text x="101" y="133" text-anchor="middle" font-size="11.5" fill="#8a6a14" font-family="Inter, 'Noto Sans SC', sans-serif">最前 64 个 token</text>
-          <rect x="166" y="90" width="778" height="56" rx="8" fill="#ede9fe" stroke="#7c3aed" stroke-width="1.6"/>
-          <text x="555" y="114" text-anchor="middle" font-size="15.5" font-weight="700" fill="#4c1d95" font-family="Inter, 'Noto Sans SC', sans-serif">3-bit LUT-B 主体（K3V3）</text>
-          <text x="555" y="133" text-anchor="middle" font-size="12" fill="#5b21b6" font-family="Inter, 'Noto Sans SC', sans-serif">3.125 bit/value · 写一次，每个 decode step 都读</text>
-          <rect x="948" y="90" width="212" height="56" rx="8" fill="#f3edd9" stroke="#a97f19" stroke-width="1.6"/>
-          <text x="1054" y="114" text-anchor="middle" font-size="14.5" font-weight="700" fill="#6b520f" font-family="Inter, 'Noto Sans SC', sans-serif">recent（BF16）</text>
-          <text x="1054" y="133" text-anchor="middle" font-size="11.5" fill="#8a6a14" font-family="Inter, 'Noto Sans SC', sans-serif">最近 256 个 token</text>
-          <line x1="1054" y1="150" x2="1054" y2="168" stroke="#b6ae95" stroke-width="1.2" stroke-dasharray="3 3"/>
-          <text x="1160" y="184" text-anchor="end" font-size="12.5" fill="#6e6a5c" font-family="Inter, 'Noto Sans SC', sans-serif">最热区域：每个 decode step 都会读取</text>
-          <line x1="40" y1="212" x2="1150" y2="212" stroke="#8a8371" stroke-width="1.6" marker-end="url(#warrG)"/>
-          <text x="40" y="232" font-size="12" fill="#97927f" font-family="Inter, 'Noto Sans SC', sans-serif">token 0</text>
-          <text x="1160" y="232" text-anchor="end" font-size="12" fill="#97927f" font-family="Inter, 'Noto Sans SC', sans-serif">最新 token</text>
-        </svg>
+        <img src="assets/lutb-k3v3-unified.svg" alt="K3V3 集成示意图。上：沿 token 轴的 cache 布局——金色 BF16 sink 与 recent 窗口包住紫色 3-bit LUT-B 主体，token 离开窗口时一次性打包，decode 通过两次 UTCQMMA.LUTB 把压缩主体作为 operand B 读取，中间是 FP32 softmax；虚线圈标出 in-core lookup 运行的位置。下：GQA 压缩独立的 K 转置与 V（两套 codebook），MLA 压缩一份共享的 512 维 latent（一套 codebook 喂两次 MMA）。">
       </div>
-      <figcaption><b>图 2.</b> 沿 token 轴的 cache 布局（段宽未按比例）。很小的 BF16 sink 和 BF16 recent 窗口
-      保护最敏感的位置；中间的主体只在离开窗口时一次性封装成 3-bit LUT-B granule。8K 上下文时这个窗口平均
-      只多花约 0.5 bit/value（3.125 → 3.63 b/val）。</figcaption>
+      <figcaption><b>图 2.</b> 完整的 K3V3 图景。<b>上：</b>沿 token 轴的 cache 布局 —— BF16 sink 与 recent
+      窗口（金色）保护最敏感的位置，token 离开窗口时一次性打包成 3-bit LUT-B granule；decode 通过两次
+      <code>UTCQMMA.LUTB</code> 把压缩主体作为 operand B 读取，中间保持 FP32 softmax，虚线圈标出 3-bit 数据
+      唯一被解压的位置。<b>下：</b>两种架构唯一的差别是哪份 cache 成为 operand B —— GQA/MHA 压缩独立的
+      <code>Kᵀ</code> 和 <code>V</code>（每层两套 codebook），MLA 压缩一份共享的 512-d latent（一套 codebook
+      喂两次 MMA）。段宽未按比例；8K 时窗口平均只多花约 0.5 bit/value（3.125 → 3.63 b/val）。</figcaption>
     </figure>
 
     <h3>3.2 Attention 里具体怎么算？</h3>
