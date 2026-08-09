@@ -273,16 +273,20 @@
       <span class="fig-title">3-bit KV 到底能不能用？每种方案的精度代价与速度收益</span>
     </div>
     <p class="fig-sub">
-      Qwen3-4B-Thinking-2507。左：相对 BF16 teacher 的实测 KL₅₀（8K，PPL 一并标注）；右：Rubin 上
-      attention-only decode 上限的解析估算。
+      选择模型与 KV 方案。左：相对 BF16/native teacher 的实测 KL₅₀（8K，PPL 一并标注）；右：Rubin 上
+      attention-only decode 上限的解析估算（按 Qwen3-4B 建模）。
     </p>
 
     <div class="controls">
       <div class="ctrl">
+        <div class="ctrl-label">模型</div>
+        <div class="seg" id="segModel"></div>
+      </div>
+      <div class="ctrl">
         <div class="ctrl-label">KV 位宽 · 方法</div>
         <div class="seg" id="segPreset"></div>
       </div>
-      <div class="ctrl">
+      <div class="ctrl" id="ctxCtrl">
         <div class="ctrl-label">Decode 上下文（速度面板）</div>
         <div class="seg" id="segCtx"></div>
       </div>
@@ -314,7 +318,8 @@
       <b>协议。</b>KL₅₀：相对 BF16 teacher 的 top-50 bucketed forward KL（nats/token），是 full-vocabulary KL
       的 data-processing 下界；PPL：WikiText-2 test，16 × 8192-token blocks。Lloyd-Max 与 OSCAR+LM 两行使用
       Rubin 硬件 Q/P 契约（E4M3 + UE8M0 block32）；
-      uniform 与 OSCAR INT2 两行以 BF16 Q/P 测得。<b>速度。</b>针对 Qwen3-4B decode（36 层 · 32 Q / 8 KV heads ·
+      uniform 与 OSCAR INT2 两行以 BF16 Q/P 测得。Kimi K3 只量化 24 个 Gated-MLA 层的 512-d MLA latent；
+      Kimi PPL 沿用 native 的 last-2048-NLL protocol，不可跨模型比较。<b>速度。</b>针对 Qwen3-4B decode（36 层 · 32 Q / 8 KV heads ·
       head dim 128）的 attention-only 解析 roofline：K3V3 每值存 3.125 bit 外加 BF16 窗口（8K 下约 3.63 b/val），
       且上限已包含 B-only LUT 约束 —— MXFP8 的 M tile 固定为 128，GQA4 single-token decode 只能填 4 行，
       算力上限被压到 273.4 TFLOP/s。不含 weights、MLP、sampling 与调度。完整消融见
@@ -884,18 +889,34 @@ function hideTip() { tip.style.display = "none"; }
    uniform 与 INT2 行以 BF16 Q/P 测得。
    ============================================================ */
 const BF16_PPL = 9.468;
-const PRESETS = [
-  { key: "bf16",     label: "BF16 \u00b7 16-bit",      color: "#4a463c", bits: 16, ppl: 9.468,    kl: 0.0,     qp: "\u2014",            kind: "bf16",
-    desc: "\u5168\u7cbe\u5ea6\u57fa\u7ebf \u2014\u2014 \u4e0d\u505a\u4efb\u4f55 KV \u91cf\u5316\u3002" },
-  { key: "uniform",  label: "Uniform \u00b7 3-bit",    color: "#a33d2f", bits: 3,  ppl: 1504.444, kl: 5.14717, qp: "BF16 Q/P",          kind: "k3v3",
-    desc: "8 \u4e2a\u7b49\u8ddd\u523b\u5ea6\uff0c\u65e0 rotation\u3001\u65e0\u62df\u5408 codebook \u2014\u2014 \u5373\u300c\u76f4\u63a5\u5b58 INT3\u300d\u3002\u5b83\u4f1a\u5d29\u6e83\u3002" },
-  { key: "lm",       label: "Lloyd-Max \u00b7 3-bit",  color: "#31607f", bits: 3,  ppl: 10.465,   kl: 0.10447, qp: "FP8/UE8M0 Q/P",     kind: "k3v3", hw: true,
-    desc: "\u79bb\u7ebf per-layer 8-entry E4M3 codebook \u2014\u2014 8 \u4e2a\u523b\u5ea6\u79fb\u5230\u6570\u503c\u771f\u6b63\u6240\u5728\u7684\u4f4d\u7f6e\u3002" },
-  { key: "oscar_lm", label: "OSCAR+LM \u00b7 3-bit",   color: "#8a6a14", bits: 3,  ppl: 10.434,   kl: 0.10090, qp: "FP8/UE8M0 Q/P",     kind: "k3v3", hw: true,
-    desc: "OSCAR rotation + outlier clipping \u52a0\u5728 Lloyd-Max codebook \u4e4b\u524d\u3002\u4e0e BF16 teacher \u7684 KL\u2085\u2080 \u6700\u4f4e\u3002" },
-  { key: "int2",     label: "OSCAR \u00b7 2-bit",      color: "#3e6b5f", bits: 2,  ppl: 9.893,    kl: 0.10791, qp: "BF16 Q/P",          kind: "ref",
-    desc: "OSCAR INT2 \u53c2\u8003\u65b9\u6848\uff08\u65e0 Lloyd-Max\uff09\u3002Rubin \u7684 LUT-B index \u662f 3-bit\uff0c\u56e0\u6b64\u672c\u884c\u4ec5\u4f5c\u7cbe\u5ea6\u53c2\u8003\u3002" },
-];
+const MODELS = {
+  qwen: {
+    label: "Qwen3-4B", klMax: 5.8, klTicks: [0, 0.1, 0.5, 1, 2, 5], speed: true, refLabel: "BF16",
+    presets: [
+      { key: "bf16",     label: "BF16 \u00b7 16-bit",      color: "#4a463c", bits: 16, ppl: 9.468,    kl: 0.0,     qp: "\u2014",            kind: "bf16",
+        desc: "\u5168\u7cbe\u5ea6\u57fa\u7ebf \u2014\u2014 \u4e0d\u505a\u4efb\u4f55 KV \u91cf\u5316\u3002" },
+      { key: "uniform",  label: "Uniform \u00b7 3-bit",    color: "#a33d2f", bits: 3,  ppl: 1504.444, kl: 5.14717, qp: "BF16 Q/P",          kind: "k3v3",
+        desc: "8 \u4e2a\u7b49\u8ddd\u523b\u5ea6\uff0c\u65e0 rotation\u3001\u65e0\u62df\u5408 codebook \u2014\u2014 \u5373\u300c\u76f4\u63a5\u5b58 INT3\u300d\u3002\u5b83\u4f1a\u5d29\u6e83\u3002" },
+      { key: "lm",       label: "Lloyd-Max \u00b7 3-bit",  color: "#31607f", bits: 3,  ppl: 10.465,   kl: 0.10447, qp: "FP8/UE8M0 Q/P",     kind: "k3v3", hw: true,
+        desc: "\u79bb\u7ebf per-layer 8-entry E4M3 codebook \u2014\u2014 8 \u4e2a\u523b\u5ea6\u79fb\u5230\u6570\u503c\u771f\u6b63\u6240\u5728\u7684\u4f4d\u7f6e\u3002" },
+      { key: "oscar_lm", label: "OSCAR+LM \u00b7 3-bit",   color: "#8a6a14", bits: 3,  ppl: 10.434,   kl: 0.10090, qp: "FP8/UE8M0 Q/P",     kind: "k3v3", hw: true,
+        desc: "OSCAR rotation + outlier clipping \u52a0\u5728 Lloyd-Max codebook \u4e4b\u524d\u3002\u4e0e BF16 teacher \u7684 KL\u2085\u2080 \u6700\u4f4e\u3002" },
+      { key: "int2",     label: "OSCAR \u00b7 2-bit",      color: "#3e6b5f", bits: 2,  ppl: 9.893,    kl: 0.10791, qp: "BF16 Q/P",          kind: "ref",
+        desc: "OSCAR INT2 \u53c2\u8003\u65b9\u6848\uff08\u65e0 Lloyd-Max\uff09\u3002Rubin \u7684 LUT-B index \u662f 3-bit\uff0c\u56e0\u6b64\u672c\u884c\u4ec5\u4f5c\u7cbe\u5ea6\u53c2\u8003\u3002" },
+    ],
+  },
+  kimi: {
+    label: "Kimi K3", klMax: 0.0105, klTicks: [0, 0.002, 0.005, 0.01], speed: false, refLabel: "native",
+    presets: [
+      { key: "bf16",     label: "Native \u00b7 MXFP4",     color: "#4a463c", bits: 16, ppl: null,  kl: 0.0,     qp: "\u2014",            kind: "bf16",
+        desc: "Native 2.8T checkpoint \u2014\u2014 \u4ec5\u4f5c\u4e3a KL teacher\uff0c\u4e0d\u4f5c\u4e3a\u7ed3\u679c\u884c\u3002" },
+      { key: "lm",       label: "Lloyd-Max \u00b7 3-bit",  color: "#31607f", bits: 3,  ppl: 1.601, kl: 0.00800, gpqa: "83.16%", qp: "FP8/UE8M0 Q/P", kind: "k3v3", hw: true,
+        desc: "\u5bf9 24 \u4e2a Gated-MLA \u5c42\u5171\u4eab\u7684 512-d c_KV \u505a latent K3V3\uff1bKDA states \u4e0e RoPE suffix \u4fdd\u6301\u539f\u751f\u3002" },
+      { key: "oscar_lm", label: "OSCAR+LM \u00b7 3-bit",   color: "#8a6a14", bits: 3,  ppl: 1.564, kl: 0.00679, gpqa: "89.73%", qp: "FP8/UE8M0 Q/P", kind: "k3v3", hw: true,
+        desc: "\u4e00\u4e2a latent rotation\uff08\u5438\u6536\u8fdb projection\uff09\u52a0\u5728 latent codebook \u4e4b\u524d\u3002PPL\u3001KL\u2085\u2080\u3001GPQA \u5168\u9762\u6700\u4f18\u3002" },
+    ],
+  },
+};
 
 /* 速度模型（attention-only 解析 roofline，与 §5 一致） */
 const MODEL = { layers: 36, qHeads: 32, kvHeads: 8, headDim: 128 };
@@ -916,8 +937,12 @@ function speedAt(ctx) {
   return { fl, bB, bK, h100, rubinBF16, byte, k3v3 };
 }
 
-const hx = { preset: "oscar_lm", ctx: 8192 };
-const curPreset = () => PRESETS.find(p => p.key === hx.preset);
+const hx = { model: "qwen", preset: "oscar_lm", ctx: 8192 };
+const curModel = () => MODELS[hx.model];
+const curPreset = () => {
+  const M = curModel();
+  return M.presets.find(p => p.key === hx.preset) || M.presets[M.presets.length - 1];
+};
 
 /* ============================================================
    渲染
@@ -945,7 +970,14 @@ function renderAccuracy() {
   const p = curPreset();
   $("hxPpl").textContent = p.kl.toFixed(5);
   $("hxPpl").style.color = p.color;
-  $("hxPplSub").textContent = "PPL " + p.ppl.toFixed(3) + "\uff08" + deltaText(p) + "\uff09 \u00b7 Q/P " + p.qp;
+  let sub;
+  if (hx.model === "kimi") {
+    sub = p.ppl === null ? "KL teacher \u00b7 native last-2048-NLL protocol"
+      : "PPL " + p.ppl.toFixed(3) + " \u00b7 GPQA " + p.gpqa + " \u00b7 Q/P " + p.qp;
+  } else {
+    sub = "PPL " + p.ppl.toFixed(3) + "\uff08" + deltaText(p) + "\uff09 \u00b7 Q/P " + p.qp;
+  }
+  $("hxPplSub").textContent = sub;
   renderChart();
 }
 
@@ -958,26 +990,27 @@ function renderChart() {
   svg.setAttribute("viewBox", "0 0 " + width + " " + H);
   svg.style.height = H + "px";
 
-  const hiKL = 5.8;
+  const M = curModel();
+  const hiKL = M.klMax;
   const X = (v) => mL + Math.sqrt(v / hiKL) * innerW;
   const plotBot = H - mB;
 
-  const ticks = [0, 0.1, 0.5, 1, 2, 5];
+  const ticks = M.klTicks;
   ticks.forEach(t => {
     const x = X(t);
     el("line", { x1: x, y1: mT - 4, x2: x, y2: plotBot, stroke: "#ece7d6", "stroke-width": 1 }, svg);
     const lbl = el("text", { x: x, y: plotBot + 16, "text-anchor": "middle", "font-size": 10.5, fill: "#97927f", "font-weight": 600 }, svg);
-    lbl.textContent = t === 0 ? "0" : (t < 1 ? t.toFixed(1) : String(t));
+    lbl.textContent = String(t);
   });
 
   const bx = X(0);
   el("line", { x1: bx, y1: mT - 6, x2: bx, y2: plotBot, stroke: "#4a463c", "stroke-width": 1.1, "stroke-dasharray": "3 4", opacity: .5 }, svg);
   const bl = el("text", { x: bx + 5, y: plotBot - 4, "font-size": 9.5, fill: "#97927f", "font-weight": 700 }, svg);
-  bl.textContent = "BF16";
+  bl.textContent = M.refLabel;
 
-  /* 相近 PPL 的圆点上下错开 */
+  /* 相近 KL 的圆点上下错开 */
   const cy = mT + (plotBot - mT) / 2;
-  const dots = PRESETS.map(p => ({ p, x: X(p.kl), lvl: 0 }))
+  const dots = M.presets.map(p => ({ p, x: X(p.kl), lvl: 0 }))
     .sort((a, b) => a.x - b.x);
   const placed = [];
   dots.forEach(d => {
@@ -1001,7 +1034,7 @@ function renderChart() {
     el("circle", { cx: selDot.x, cy: selDot.cy, r: 13, fill: "none", stroke: selDot.p.color, "stroke-width": 1.6, "stroke-dasharray": "2.5 3", opacity: .85 }, svg);
     const lblX = Math.min(Math.max(selDot.x, mL + 40), width - mR - 46);
     const g = el("text", { x: lblX, y: mT - 10, "text-anchor": "middle", "font-size": 11.5, "font-weight": 700, fill: selDot.p.color }, svg);
-    g.textContent = selDot.p.label.split(" \u00b7")[0] + " " + selDot.p.kl.toFixed(3);
+    g.textContent = selDot.p.label.split(" \u00b7")[0] + " " + (selDot.p.kl < 0.02 ? selDot.p.kl.toFixed(4) : selDot.p.kl.toFixed(3));
     el("line", { x1: selDot.x, y1: mT - 6, x2: selDot.x, y2: selDot.cy - 13, stroke: selDot.p.color, "stroke-width": 1, "stroke-dasharray": "2 3", opacity: .6 }, svg);
   }
 }
@@ -1016,7 +1049,8 @@ function drawDot(svg, d, isSel) {
   c.addEventListener("mousemove", (ev) => showTip(
     '<div class="t-title">' + d.p.label + "</div>" +
     '<div class="t-row"><span>KL\u2085\u2080</span><b>' + d.p.kl.toFixed(5) + "</b></div>" +
-    '<div class="t-row"><span>PPL</span><b>' + d.p.ppl.toFixed(3) + "</b></div>" +
+    '<div class="t-row"><span>PPL</span><b>' + (d.p.ppl === null ? "\u2014" : d.p.ppl.toFixed(3)) + "</b></div>" +
+    (d.p.gpqa ? '<div class="t-row"><span>GPQA</span><b>' + d.p.gpqa + "</b></div>" : "") +
     '<div class="t-row"><span>Q/P</span><b>' + d.p.qp + "</b></div>",
     ev.clientX, ev.clientY));
   c.addEventListener("mouseleave", hideTip);
@@ -1058,8 +1092,23 @@ function barRow(host, name, tok, max, color, opts) {
 
 function renderSpeed() {
   const p = curPreset();
+  const M = curModel();
   const sp = speedAt(hx.ctx);
   const ctxL = CTX_LABEL[hx.ctx];
+  if (!M.speed) {
+    $("hxTokK").textContent = "\u901f\u5ea6 \u2014 attention-only tok/s";
+    $("hxTok").textContent = "\u2014";
+    $("hxTok").style.color = "#97927f";
+    $("hxTokSub").textContent = "roofline \u6309 Qwen3-4B GQA decode \u5efa\u6a21 \u2014 MLA latent \u672a\u5efa\u6a21";
+    const host0 = $("hxBars");
+    host0.innerHTML = "";
+    const note = document.createElement("div");
+    note.className = "bar-track na";
+    note.style.cssText = "height:76px;display:flex;align-items:center;";
+    note.innerHTML = '<span class="bar-ghost" style="position:static;white-space:normal;line-height:1.6;padding:0 14px;">\u00a75 \u7684 roofline \u6309 Qwen3-4B GQA decode \u5efa\u6a21\uff1bKimi MLA-latent \u8def\u5f84\u672a\u5728\u6b64\u5efa\u6a21\u3002</span>';
+    host0.appendChild(note);
+    return;
+  }
   $("hxTokK").textContent = "\u901f\u5ea6 \u2014 attention-only tok/s @ " + ctxL;
 
   if (p.kind === "k3v3") {
@@ -1093,6 +1142,18 @@ function renderSpeed() {
 
 function renderCaption() {
   const p = curPreset();
+  if (hx.model === "kimi") {
+    let khtml;
+    if (p.kind === "bf16") {
+      khtml = p.desc;
+    } else {
+      khtml = p.desc + "\u5728\u516c\u5f00\u7684 2.8T checkpoint \u4e0a\uff0832\u00d7H100\u3001patched SGLang\uff09\uff1aPPL <b>" + p.ppl.toFixed(3) +
+        "</b> \u00b7 KL\u2085\u2080 <b>" + p.kl.toFixed(5) + "</b> \u00b7 GPQA <b>" + p.gpqa +
+        "</b>\uff08\u4e09\u79cd\u5b50\u5747\u503c\uff09\u3002\u901f\u5ea6\u9762\u677f\u4ec5\u5bf9 Qwen3-4B \u5efa\u6a21\uff0c\u89c1 \u00a75\u3002";
+    }
+    $("hxCaption").innerHTML = khtml;
+    return;
+  }
   const sp = speedAt(hx.ctx);
   const ctxL = CTX_LABEL[hx.ctx];
   let html;
@@ -1119,8 +1180,15 @@ function renderCaption() {
 }
 
 function render() {
-  seg("segPreset", PRESETS.map(p => [p.key, p.label]), hx.preset, (k) => { hx.preset = k; render(); });
+  seg("segModel", Object.keys(MODELS).map(k => [k, MODELS[k].label]), hx.model, (k) => {
+    hx.model = k;
+    if (!MODELS[k].presets.some(p => p.key === hx.preset)) hx.preset = "oscar_lm";
+    render();
+  });
+  const M = curModel();
+  seg("segPreset", M.presets.map(p => [p.key, p.label]), hx.preset, (k) => { hx.preset = k; render(); });
   seg("segCtx", [[8192, "8K"], [32768, "32K"]], hx.ctx, (k) => { hx.ctx = +k; render(); });
+  $("ctxCtrl").style.display = M.speed ? "" : "none";
   renderAccuracy();
   renderSpeed();
   renderCaption();
