@@ -781,17 +781,17 @@ effective         = 3.125 bit/value</code></pre>
 
     <h2 id="sec5"><span class="idx">6</span>这个故事目前说明了什么？</h2>
     <ol>
+      <li><strong>普通的 3-bit KV 无法承担 serving。</strong>Naive uniform INT3 直接崩溃 —— 8K PPL 从 9.468
+        涨到 1504、KL₅₀ 涨到 5.15，任何 sink/recent 窗口都救不回来。</li>
+      <li><strong>OSCAR + Lloyd-Max 能把质量带回来。</strong>离线 per-layer codebook 加 rotation/clipping 把
+        Qwen3-4B 拉回 PPL ≈ 10.4、KL₅₀ 最低，并把 Kimi K3 的 GPQA 从 83.16% 提到 89.73% —— 全部在 ISA 规定的
+        Q/P 契约（E4M3 + UE8M0 block32）下完成。</li>
       <li><strong>Dense KV-on-LUT-B 没有 legality blocker，但有 decode-shape blocker。</strong>PTX 不要求 B
         必须是 static weight；<code>Kᵀ</code> 和 <code>V</code> 可以成为动态 compressed B，但 B-only + MXFP8
         M=128 会限制 single-token tile occupancy。</li>
-      <li><strong>Compile proof 不等于 kernel done。</strong>我们生成了 <code>UTCQMMA.LUTB</code> SASS，
-        但还没有 production PagedAttention implementation。</li>
-      <li><strong>Precision contract 必须由 ISA 决定。</strong>对 LUT-B 的 MXFP8 A operand，hardware contract
-        是 E4M3 + UE8M0 block32。</li>
-      <li><strong>Offline LM 是更真实的 serving recipe。</strong>它移除了 runtime centroid fitting，
-        只保留 index assignment。</li>
-      <li><strong>Performance 不只看 bytes。</strong>Packed layout、HBM efficiency 和 collector reuse 仍然重要，
-        但 GQA packing、multi-token decode 与 small-M path 决定 Tensor Core 能否吃到这些 bandwidth 收益。</li>
+      <li><strong>Performance 不只看 bytes。</strong>只算 bytes 是 H100 BF16 的 29–32×，tile-corrected
+        single-token 上限约 20.4×（60–80% 执行效率下 12.3–16.4×）；GQA packing、multi-token decode 与
+        small-M path 决定 Tensor Core 能否吃到这些带宽收益。</li>
     </ol>
 
     <h2 id="repro">Reproducibility</h2>
