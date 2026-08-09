@@ -57,7 +57,7 @@
   <text x="70" y="144" class="band-title">SHARED RECIPE &#8212; write the cache once along the token axis, read it with two lookup MMAs</text>
 
   <text x="1306" y="150" class="vtiny" text-anchor="middle">packed once on exit</text>
-  <path d="M1352 172 C 1328 159, 1286 159, 1262 170" fill="none" stroke="#7c3aed" stroke-width="1.5" marker-end="url(#arrowPurple)"/>
+  <path d="M1352 172 C 1328 159, 1286 159, 1262 172" fill="none" stroke="#7c3aed" stroke-width="1.5" marker-end="url(#arrowPurple)"/>
 
   <!-- token-axis strip -->
   <rect x="70" y="174" width="130" height="52" rx="8" fill="#f3edd9" stroke="#a97f19" stroke-width="1.6"/>
@@ -71,19 +71,19 @@
   <text x="1420" y="214" text-anchor="middle" class="gtiny">last 256 tokens</text>
 
   <!-- strip feeds the MMAs as operand B -->
-  <path d="M530 226 V248" class="purple-line"/>
+  <path d="M530 226 V257" class="purple-line"/>
   <text x="544" y="244" class="vtiny">operand B</text>
 
   <!-- decode row -->
   <rect x="70" y="258" width="250" height="60" rx="12" class="nbox"/>
   <text x="195" y="282" class="label" text-anchor="middle">A: Q, then P &#183; MXFP8</text>
   <text x="195" y="304" class="small" text-anchor="middle">E4M3 + UE8M0 block32 scale</text>
-  <path d="M320 288 H354" class="line"/>
+  <path d="M320 288 H359" class="line"/>
   <rect x="353" y="251" width="354" height="74" rx="15" class="halo"/>
   <rect x="360" y="258" width="340" height="60" rx="12" fill="url(#rubin)"/>
   <text x="530" y="283" class="mono white" text-anchor="middle">UTCQMMA.LUTB &#215; 2</text>
   <text x="530" y="305" class="small white" text-anchor="middle">the only place 3-bit data is decompressed</text>
-  <path d="M707 288 H741" class="line"/>
+  <path d="M707 288 H743" class="line"/>
   <rect x="744" y="258" width="280" height="60" rx="12" class="nbox"/>
   <text x="884" y="282" class="label" text-anchor="middle">FP32 softmax between MMAs</text>
   <text x="884" y="304" class="small" text-anchor="middle">max / exp / sum &#183; P stays on chip</text>
@@ -104,37 +104,37 @@
   <rect x="116" y="516" width="112" height="52" rx="11" class="nbox2"/>
   <text x="172" y="539" class="label" text-anchor="middle">V</text>
   <text x="172" y="559" class="tiny" text-anchor="middle">rotate with R_v</text>
-  <path d="M228 476 H286" class="line"/>
-  <path d="M228 542 H252 V498 H286" class="line"/>
+  <path d="M228 476 H288" class="line"/>
+  <path d="M228 542 H252 V498 H288" class="line"/>
   <rect x="289" y="450" width="196" height="118" rx="14" class="nbox"/>
   <text x="387" y="482" class="label" text-anchor="middle">quantize offline</text>
   <text x="387" y="507" class="small" text-anchor="middle">K codebook + R_k</text>
   <text x="387" y="529" class="small" text-anchor="middle">V codebook + R_v</text>
   <text x="387" y="553" class="tiny" text-anchor="middle">sink / recent bypass in BF16</text>
-  <path d="M485 509 H523" class="purple-line"/>
+  <path d="M485 509 H525" class="purple-line"/>
   <rect x="526" y="450" width="228" height="118" rx="14" class="vbox"/>
   <text x="640" y="480" class="vlabel" text-anchor="middle">two LUT-B caches</text>
   <text x="640" y="506" class="vsmall" text-anchor="middle">INT3 K^T &#8594; B of MMA 1</text>
   <text x="640" y="529" class="vsmall" text-anchor="middle">INT3 V &#8594; B of MMA 2</text>
   <text x="640" y="553" class="tiny" text-anchor="middle">K stored physically transposed</text>
 
-  <path d="M560 568 V584 H312 V596" class="purple-line"/>
-  <path d="M700 568 V596" class="purple-line"/>
+  <path d="M560 568 V584 H312 V609" class="purple-line"/>
+  <path d="M700 568 V609" class="purple-line"/>
   <text x="436" y="579" class="vtiny" text-anchor="middle">operand B</text>
 
   <circle cx="88" cy="646" r="17" fill="#857c66"/>
   <text x="88" y="646" class="step">2</text>
   <rect x="116" y="620" width="86" height="52" rx="11" class="nbox2"/>
   <text x="159" y="652" class="label" text-anchor="middle">Q</text>
-  <path d="M202 646 H234" class="line"/>
+  <path d="M202 646 H236" class="line"/>
   <rect x="230" y="603" width="164" height="86" rx="16" class="halo"/>
   <rect x="237" y="610" width="150" height="72" rx="13" fill="url(#rubin)"/>
   <text x="312" y="639" class="label white" text-anchor="middle">Q &#215; K^T</text>
   <text x="312" y="662" class="tiny white" text-anchor="middle">LUT-B MMA 1</text>
-  <path d="M394 646 H420" class="line"/>
+  <path d="M394 646 H445" class="line"/>
   <rect x="446" y="620" width="102" height="52" rx="11" class="nbox"/>
   <text x="497" y="652" class="label" text-anchor="middle">FP32 P</text>
-  <path d="M548 646 H578" class="line"/>
+  <path d="M548 646 H606" class="line"/>
   <rect x="600" y="603" width="168" height="86" rx="16" class="halo"/>
   <rect x="607" y="610" width="154" height="72" rx="13" fill="url(#rubin)"/>
   <text x="684" y="639" class="label white" text-anchor="middle">P &#215; V</text>
@@ -154,11 +154,11 @@
   <rect x="892" y="450" width="160" height="60" rx="11" class="nbox2"/>
   <text x="972" y="476" class="label" text-anchor="middle">c_KV latent</text>
   <text x="972" y="498" class="small" text-anchor="middle">512-d, shared by K and V</text>
-  <path d="M1052 480 H1090" class="line"/>
+  <path d="M1052 480 H1092" class="line"/>
   <rect x="1093" y="450" width="196" height="60" rx="11" class="nbox"/>
   <text x="1191" y="476" class="label" text-anchor="middle">quantize offline</text>
   <text x="1191" y="498" class="small" text-anchor="middle">one codebook + one R_latent</text>
-  <path d="M1289 480 H1327" class="purple-line"/>
+  <path d="M1289 480 H1329" class="purple-line"/>
   <rect x="1330" y="444" width="200" height="72" rx="11" class="vbox"/>
   <text x="1430" y="470" class="vlabel" text-anchor="middle">one INT3 latent</text>
   <text x="1430" y="492" class="vsmall" text-anchor="middle">B of MMA 1 as c_KV^T</text>
@@ -167,8 +167,8 @@
   <text x="1096" y="548" class="small" text-anchor="middle">Native bypass (never quantized):</text>
   <text x="1096" y="566" class="tiny" text-anchor="middle">69 KDA states + 64-d RoPE suffix</text>
 
-  <path d="M1400 516 V584 H1124 V596" class="purple-line"/>
-  <path d="M1492 516 V596" class="purple-line"/>
+  <path d="M1400 516 V584 H1124 V609" class="purple-line"/>
+  <path d="M1492 516 V609" class="purple-line"/>
   <text x="1262" y="579" class="vtiny" text-anchor="middle">operand B</text>
 
   <circle cx="864" cy="646" r="17" fill="#857c66"/>
@@ -176,15 +176,15 @@
   <rect x="892" y="620" width="122" height="52" rx="11" class="nbox2"/>
   <text x="953" y="645" class="label" text-anchor="middle">absorbed Q</text>
   <text x="953" y="665" class="tiny" text-anchor="middle">latent basis + RoPE term</text>
-  <path d="M1014 646 H1042" class="line"/>
+  <path d="M1014 646 H1048" class="line"/>
   <rect x="1042" y="603" width="164" height="86" rx="16" class="halo"/>
   <rect x="1049" y="610" width="150" height="72" rx="13" fill="url(#rubin)"/>
   <text x="1124" y="639" class="label white" text-anchor="middle">Q &#215; c_KV^T</text>
   <text x="1124" y="662" class="tiny white" text-anchor="middle">LUT-B MMA 1</text>
-  <path d="M1206 646 H1234" class="line"/>
+  <path d="M1206 646 H1257" class="line"/>
   <rect x="1258" y="620" width="102" height="52" rx="11" class="nbox"/>
   <text x="1309" y="652" class="label" text-anchor="middle">FP32 P</text>
-  <path d="M1360 646 H1390" class="line"/>
+  <path d="M1360 646 H1418" class="line"/>
   <rect x="1412" y="603" width="132" height="86" rx="16" class="halo"/>
   <rect x="1419" y="610" width="118" height="72" rx="13" fill="url(#rubin)"/>
   <text x="1478" y="639" class="label white" text-anchor="middle">P &#215; c_KV</text>

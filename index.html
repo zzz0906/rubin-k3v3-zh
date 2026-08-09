@@ -626,15 +626,16 @@ effective         = 3.125 bit/value</code></pre>
         <tr><td>Qwen3.5-35B-A3B</td><td>Offline LM K3V3 + FP8/UE8M0 Q/P（无 OSCAR）</td><td class="num">6.127</td><td class="num">0.02870</td><td class="num">82.49%</td></tr>
         <tr><td>Gemma4-12B</td><td>OSCAR + offline LM K3V3 + FP8/UE8M0 Q/P</td><td class="num"><strong>6.120</strong></td><td class="num"><strong>0.04806</strong></td><td class="num">62.29%</td></tr>
         <tr><td>Gemma4-12B</td><td>Offline LM K3V3 + FP8/UE8M0 Q/P（无 OSCAR）</td><td class="num">6.388</td><td class="num">0.07572</td><td class="num">62.29%</td></tr>
-        <tr><td>Kimi K3</td><td>OSCAR + offline LM K3V3 + FP8/UE8M0 Q/P</td><td class="num"><strong>1.564</strong></td><td class="num"><strong>0.00679</strong></td><td class="num">—</td></tr>
-        <tr><td>Kimi K3</td><td>Offline LM K3V3 + FP8/UE8M0 Q/P（无 OSCAR）</td><td class="num">1.601</td><td class="num">0.00800</td><td class="num">—</td></tr>
+        <tr><td>Kimi K3</td><td>OSCAR + offline LM K3V3 + FP8/UE8M0 Q/P</td><td class="num"><strong>1.564</strong></td><td class="num"><strong>0.00679</strong></td><td class="num"><strong>89.73%</strong></td></tr>
+        <tr><td>Kimi K3</td><td>Offline LM K3V3 + FP8/UE8M0 Q/P（无 OSCAR）</td><td class="num">1.601</td><td class="num">0.00800</td><td class="num">83.16%</td></tr>
       </tbody>
     </table></div>
     <p>
       Kimi K3 的公开 checkpoint 是 2.8T-parameter、1.56 TB MXFP4 model。两行结果都基于 MLA latent K3V3，
       不把 512-d latent 展开成标准 K/V 后再量化；native checkpoint 仅提供 KL teacher distribution，
-      不作为第三条结果。Latent OSCAR 把 PPL 从 1.601 降到 1.564（约 2.3%），并把 KL₅₀ 从 0.00800 降到
-      0.00679（约 15.2%）；GPQA 三种子仍需完成后再填。完整 2.8T 测量在 32 张 H100 上通过 patched SGLang
+      不作为第三条结果。Latent OSCAR 把 PPL 从 1.601 降到 1.564（约 2.3%），把 KL₅₀ 从 0.00800 降到
+      0.00679（约 15.2%），并把 GPQA 三种子均值从 83.16% 提高到 89.73%（+6.57 个百分点）；OSCAR 三个 seed 为
+      89.39% / 89.90% / 89.90%，无 OSCAR 为 84.34% / 84.34% / 80.81%。完整 2.8T 测量在 32 张 H100 上通过 patched SGLang
       runtime 运行公开的 <code>moonshotai/Kimi-K3</code> checkpoint；H100 在这里是 numerical oracle ——
       physical cache 仍会 reconstruct 成 BF16（见 <a href="#repro">Reproducibility</a>）。
     </p>
