@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Vera Rubin 可以把 Attention 加速 30× 吗？精度模拟揭示真相</title>
+<title>Vera Rubin 能支持 3-bit KV Attention 吗？精度模拟揭示真相</title>
 <meta name="description" content="把 3-bit LUT-B KV cache 映射到 NVIDIA Vera Rubin 的 attention：Lloyd-Max codebook 与 OSCAR rotation 的精度模拟、CUDA 13.4 编译探测，以及经 operand 修正的 roofline 估算。">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -241,7 +241,7 @@
 
 <header class="paper">
   <div class="wrap">
-    <h1 class="title">Vera Rubin 可以把 Attention 加速 30× 吗？
+    <h1 class="title">Vera Rubin 能支持 3-bit KV Attention 吗？
       <span class="subtitle-line">一次精度模拟揭示真相</span>
     </h1>
     <div class="authors">Zhongzhu Zhou&ensp;·&ensp;Donglin Zhuang&ensp;·&ensp;Chenfeng Xu</div>
@@ -770,7 +770,7 @@ effective         = 3.125 bit/value</code></pre>
     <p>
       加入 operand shape 后，single-token attention-only ceiling 相对 H100 BF16 约为 <strong>20.4×</strong>，
       相对 B200 BF16 约为 <strong>8.5×</strong>；若再按 tile-corrected ceiling 的 60–80% 估计，则分别约为
-      <strong>12.3–16.4×</strong> 和 <strong>5.1–6.8×</strong>。标题中的 30× 只在 byte-only roofline、
+      <strong>12.3–16.4×</strong> 和 <strong>5.1–6.8×</strong>。30× 这个数字只在 byte-only roofline、
       或能用 GQA/multi-token/small-M path 重新填满 Tensor Core 时成立。
     </p>
     <div class="callout">
