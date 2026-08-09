@@ -273,8 +273,8 @@
       <span class="fig-title">3-bit KV 到底能不能用？每种方案的精度代价与速度收益</span>
     </div>
     <p class="fig-sub">
-      选择模型与 KV 方案。左：相对 BF16/native teacher 的实测 KL₅₀（8K，PPL 一并标注）；右：Rubin 上
-      attention-only decode 上限的解析估算（按 Qwen3-4B 建模）。
+      选择模型与 KV 方案。左：相对 BF16/native teacher 的实测 KL₅₀（8K，PPL 一并标注）；右：Qwen3-4B 显示
+      Rubin attention-only 上限，Kimi K3 显示 GPQA Diamond accuracy。
     </p>
 
     <div class="controls">
@@ -910,9 +910,9 @@ const MODELS = {
     presets: [
       { key: "bf16",     label: "Native \u00b7 MXFP4",     color: "#4a463c", bits: 16, ppl: null,  kl: 0.0,     qp: "\u2014",            kind: "bf16",
         desc: "Native 2.8T checkpoint \u2014\u2014 \u4ec5\u4f5c\u4e3a KL teacher\uff0c\u4e0d\u4f5c\u4e3a\u7ed3\u679c\u884c\u3002" },
-      { key: "lm",       label: "Lloyd-Max \u00b7 3-bit",  color: "#31607f", bits: 3,  ppl: 1.601, kl: 0.00800, gpqa: "83.16%", qp: "FP8/UE8M0 Q/P", kind: "k3v3", hw: true,
+      { key: "lm",       label: "Lloyd-Max \u00b7 3-bit",  color: "#31607f", bits: 3,  ppl: 1.601, kl: 0.00800, gpqa: "83.16%", seeds: "84.34 / 84.34 / 80.81", qp: "FP8/UE8M0 Q/P", kind: "k3v3", hw: true,
         desc: "\u5bf9 24 \u4e2a Gated-MLA \u5c42\u5171\u4eab\u7684 512-d c_KV \u505a latent K3V3\uff1bKDA states \u4e0e RoPE suffix \u4fdd\u6301\u539f\u751f\u3002" },
-      { key: "oscar_lm", label: "OSCAR+LM \u00b7 3-bit",   color: "#8a6a14", bits: 3,  ppl: 1.564, kl: 0.00679, gpqa: "89.73%", qp: "FP8/UE8M0 Q/P", kind: "k3v3", hw: true,
+      { key: "oscar_lm", label: "OSCAR+LM \u00b7 3-bit",   color: "#8a6a14", bits: 3,  ppl: 1.564, kl: 0.00679, gpqa: "89.73%", seeds: "89.39 / 89.90 / 89.90", qp: "FP8/UE8M0 Q/P", kind: "k3v3", hw: true,
         desc: "\u4e00\u4e2a latent rotation\uff08\u5438\u6536\u8fdb projection\uff09\u52a0\u5728 latent codebook \u4e4b\u524d\u3002PPL\u3001KL\u2085\u2080\u3001GPQA \u5168\u9762\u6700\u4f18\u3002" },
     ],
   },
@@ -1096,17 +1096,29 @@ function renderSpeed() {
   const sp = speedAt(hx.ctx);
   const ctxL = CTX_LABEL[hx.ctx];
   if (!M.speed) {
-    $("hxTokK").textContent = "\u901f\u5ea6 \u2014 attention-only tok/s";
-    $("hxTok").textContent = "\u2014";
-    $("hxTok").style.color = "#97927f";
-    $("hxTokSub").textContent = "roofline \u6309 Qwen3-4B GQA decode \u5efa\u6a21 \u2014 MLA latent \u672a\u5efa\u6a21";
+    $("hxTokK").textContent = "GPQA Diamond \u2014 \u4e09\u79cd\u5b50\u5747\u503c \u2191";
     const host0 = $("hxBars");
     host0.innerHTML = "";
-    const note = document.createElement("div");
-    note.className = "bar-track na";
-    note.style.cssText = "height:76px;display:flex;align-items:center;";
-    note.innerHTML = '<span class="bar-ghost" style="position:static;white-space:normal;line-height:1.6;padding:0 14px;">\u00a75 \u7684 roofline \u6309 Qwen3-4B GQA decode \u5efa\u6a21\uff1bKimi MLA-latent \u8def\u5f84\u672a\u5728\u6b64\u5efa\u6a21\u3002</span>';
-    host0.appendChild(note);
+    if (p.gpqa) {
+      $("hxTok").textContent = p.gpqa;
+      $("hxTok").style.color = p.color;
+      $("hxTokSub").textContent = p.key === "oscar_lm"
+        ? "\u8f83 Lloyd-Max +6.57 \u4e2a\u767e\u5206\u70b9 \u00b7 seeds " + p.seeds
+        : "seeds " + p.seeds;
+    } else {
+      $("hxTok").textContent = "\u2014";
+      $("hxTok").style.color = "#97927f";
+      $("hxTokSub").textContent = "native teacher \u2014 \u4e0d\u53c2\u4e0e GPQA \u5bf9\u6bd4";
+    }
+    const lmP = M.presets.find(x => x.key === "lm");
+    const osP = M.presets.find(x => x.key === "oscar_lm");
+    barRow(host0, "Lloyd-Max", parseFloat(lmP.gpqa), 100, lmP.color, { valText: lmP.gpqa });
+    barRow(host0, "OSCAR+LM", parseFloat(osP.gpqa), 100, osP.color, { valText: osP.gpqa });
+    const hint = document.createElement("div");
+    hint.className = "chart-hint";
+    hint.style.textAlign = "left";
+    hint.textContent = "Rubin \u901f\u5ea6 roofline \u4ec5\u5bf9 Qwen3-4B GQA decode \u5efa\u6a21\uff0c\u89c1 \u00a75\u3002";
+    host0.appendChild(hint);
     return;
   }
   $("hxTokK").textContent = "\u901f\u5ea6 \u2014 attention-only tok/s @ " + ctxL;
