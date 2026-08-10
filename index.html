@@ -1267,8 +1267,7 @@ function renderCaption() {
       fmtTok(sp.halfRate) + "</b> attention tok/s\uff08H100 BF16 \u7684 " + fmtX(sp.halfRate / sp.h100) +
       "\uff09\uff1b\u82e5 LUT-B \u80fd\u8fbe\u5230 Rubin \u516c\u5f00\u7684 17.5-PFLOP/s dense FP8 rate\uff0c\u5219\u4e3a <b>" +
       fmtTok(sp.denseRate) + "</b>\uff08" + fmtX(sp.denseRate / sp.h100) +
-      "\uff09\u3002\u8fd9\u4e24\u4e2a\u503c\u662f modeling endpoints\uff0c\u4e0d\u662f prediction interval\u3002\u771f\u5b9e full-tile LUT-B throughput \u5c1a\u672a\u516c\u5f00\uff0c" +
-      "\u5fc5\u987b\u5728 Rubin \u786c\u4ef6\u4e0a\u5b9e\u6d4b\u3002";
+      "\uff09\u3002\u8fd9\u4e24\u4e2a\u503c\u662f modeling endpoints\uff0c\u4e0d\u662f prediction interval\u3002";
     if (p.key === "uniform") {
       html += " <b>\u5b58\u50a8\u76f8\u540c\u3001modeled speed scenarios \u76f8\u540c \u2014\u2014 \u4f46 KL\u2085\u2080 \u7206\u5230\u4e86 " +
         p.kl.toFixed(2) + " nats/token\uff08PPL \u00d7" + (p.ppl / BF16_PPL).toFixed(0) +
