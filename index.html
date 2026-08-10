@@ -218,6 +218,11 @@
 
   .refs { font-family: var(--serif); font-size: 14.5px; }
   .refs li { margin-bottom: 7px; }
+  .cite {
+    margin-left: 3px; white-space: nowrap; vertical-align: super;
+    font-family: var(--sans); font-size: .62em; font-weight: 500;
+  }
+  .cite a { margin-left: 2px; }
 
   footer {
     border-top: 1px solid var(--line-2); margin-top: 26px; padding: 26px 0 44px;
@@ -325,6 +330,7 @@
       且上限已包含 B-only LUT 约束 —— MXFP8 的 M tile 固定为 128，GQA4 single-token decode 只能填 4 行，
       算力上限被压到 273.4 TFLOP/s。不含 weights、MLP、sampling 与调度。完整消融见
       <a href="#sec4">§4</a>；含 B200、执行效率区间与 byte-only 上界的完整推导见 <a href="#throughput">§5</a>。
+      术语定义与原始引用：<a href="#ref-max">Lloyd–Max [1, 2]</a> 和 <a href="#ref-oscar">OSCAR [3]</a>。
     </div>
   </section>
 
@@ -339,12 +345,22 @@
         <li><strong>Attention 怎么用它？</strong>把 <code>Kᵀ</code> 和 <code>V</code> 存成 3-bit LUT-B operand；
           Q 和 softmax 后的 P 以 MXFP8 留在 A，两次乘法都直接消费压缩 KV。</li>
         <li><strong>为什么不能直接用朴素 INT3？</strong>Outlier 会毁掉它：Qwen3-4B 的 8K PPL 从 9.468 暴涨到
-          1504。离线 Lloyd-Max codebook —— 加上 <a href="https://arxiv.org/abs/2605.17757">OSCAR</a> rotation
-          和 BF16 sink/recent 窗口 —— 能拉回到约 10.4。</li>
+          1504。离线 Lloyd–Max<span class="cite"><a href="#ref-max">[1]</a><a href="#ref-lloyd">[2]</a></span>
+          codebook —— 加上 OSCAR<span class="cite"><a href="#ref-oscar">[3]</a></span> rotation 和 BF16
+          sink/recent 窗口 —— 能拉回到约 10.4。</li>
         <li><strong>能快多少？</strong>只算 bytes 是 H100 BF16 的 29–32×，但 LUT 只支持 B，而 MXFP8 的 M tile
           是 128、GQA 只有 4 行：可信的 single-token 上限约 <strong>20.4×</strong>（60–80% 执行效率下
           <strong>12.3–16.4×</strong>）。30× 只是 byte-only 上界。</li>
       </ol>
+    </div>
+
+    <div class="callout" id="techniques">
+      <strong>术语说明。</strong><strong>Lloyd–Max</strong> 是经典的 non-uniform scalar quantization 算法：
+      在固定刻度数量下，交替执行 nearest-center assignment 与 centroid update，以最小化均方重建误差
+      <span class="cite"><a href="#ref-max">[1]</a><a href="#ref-lloyd">[2]</a></span>。
+      <strong>OSCAR</strong>（Offline Spectral Covariance-Aware Rotation）则在低比特 KV-cache quantization
+      之前，离线学习固定的、attention-aware 的逐层 rotation 与 clipping threshold
+      <span class="cite"><a href="#ref-oscar">[3]</a></span>。
     </div>
 
     <h2 id="sec1"><span class="idx">1</span>Intro：Vera Rubin 最近到底变了什么？</h2>
@@ -416,8 +432,8 @@
 total             = 200 bytes
 effective         = 3.125 bit/value</code></pre>
     <p>
-      LUT 不要求 uniform spacing，因此可以放 Lloyd-Max 这种 non-uniform centroids。这也是 3-bit 仍可能保住
-      质量的关键。
+      LUT 不要求 uniform spacing，因此可以放 Lloyd–Max<span class="cite"><a href="#ref-max">[1]</a><a href="#ref-lloyd">[2]</a></span>
+      这种 non-uniform centroids。这也是 3-bit 仍可能保住质量的关键。
     </p>
 
     <h3>2.2 CUDA 13.4 compile test 告诉了我们什么？</h3>
@@ -504,7 +520,7 @@ effective         = 3.125 bit/value</code></pre>
       <code>B_KEEP → B_REUSE</code>，让一个 K/V tile 服务 4 个 Q heads。
     </p>
 
-    <h3>3.3 Lloyd-Max：把 8 个刻度放到真正需要的位置</h3>
+    <h3>3.3 Lloyd–Max：把 8 个刻度放到真正需要的位置<span class="cite"><a href="#ref-max">[1]</a><a href="#ref-lloyd">[2]</a></span></h3>
     <p>
       3-bit 只能表示 8 个值。最简单的 uniform quantization 会把 8 个刻度等距排开；如果大多数值挤在 0 附近、
       只有少量 outlier 很大，很多刻度会浪费在几乎没有数据的区域，0 附近反而分得太粗。
@@ -521,7 +537,7 @@ effective         = 3.125 bit/value</code></pre>
       K/V 两套 8-value codebook；MLA 每层只拟合 latent 的一套 codebook。
     </p>
 
-    <h3>3.4 OSCAR：先把尖峰摊平，再交给 3-bit</h3>
+    <h3>3.4 OSCAR：先把尖峰摊平，再交给 3-bit<span class="cite"><a href="#ref-oscar">[3]</a></span></h3>
     <p>
       Lloyd-Max 解决的是“8 个刻度放在哪里”，但如果少数维度特别大，3-bit 仍然很难表示。
       <a href="https://arxiv.org/abs/2605.17757">OSCAR</a> 可以理解为：
@@ -821,6 +837,9 @@ git checkout zhongzhu/oscar-int3-rubin-simulate</code></pre>
 
     <h2 id="refs">References</h2>
     <ol class="refs">
+      <li id="ref-max">J. Max，<a href="https://doi.org/10.1109/TIT.1960.1057548">“Quantizing for Minimum Distortion,”</a> <i>IRE Transactions on Information Theory</i>，1960。</li>
+      <li id="ref-lloyd">S. P. Lloyd，<a href="https://doi.org/10.1109/TIT.1982.1056489">“Least Squares Quantization in PCM,”</a> <i>IEEE Transactions on Information Theory</i>，1982（原始工作于 1957 年内部流传）。</li>
+      <li id="ref-oscar">Z. Zhou 等，<a href="https://arxiv.org/abs/2605.17757">“OSCAR: Offline Spectral Covariance-Aware Rotation for 2-bit KV Cache Quantization,”</a> arXiv:2605.17757，2026。</li>
       <li><a href="https://developer.nvidia.com/blog/inside-nvidia-rubin-gpu-architecture-powering-the-era-of-agentic-ai/">NVIDIA: Inside NVIDIA Rubin GPU Architecture</a></li>
       <li><a href="https://developer.nvidia.com/blog/inside-the-nvidia-rubin-platform-six-new-chips-one-ai-supercomputer/">NVIDIA: Inside the Vera Rubin Platform</a></li>
       <li><a href="https://www.nvidia.com/en-us/data-center/vera-rubin-nvl72/">NVIDIA: Vera Rubin NVL72 specs</a></li>
