@@ -260,8 +260,10 @@
     <a href="#sec2">2&ensp;3-bit LUT-B</a>
     <a href="#sec3">3&ensp;映射到 attention</a>
     <a href="#sec4">4&ensp;Accuracy simulation</a>
-    <a href="#throughput">5&ensp;Speed projection</a>
-    <a href="#sec5">6&ensp;结论</a>
+    <a href="#throughput">5&ensp;GQA / MLA 通用模型</a>
+    <a href="#estimate">6&ensp;我们的估算</a>
+    <a href="#limitations">7&ensp;Limitations</a>
+    <a href="#takeaways">8&ensp;结论</a>
     <a href="#repro">Reproducibility</a>
     <a href="#refs">References</a>
   </nav>
@@ -275,7 +277,7 @@
     </div>
     <p class="fig-sub">
       选择模型与 KV 方案。左：相对 BF16/native teacher 的实测 KL₅₀（8K，PPL 一并标注）；右：Qwen3-4B 显示
-      Rubin attention-only 上限，Kimi K3 显示 GPQA Diamond accuracy。
+      两个 Rubin attention-only sensitivity scenarios，Kimi K3 显示 GPQA Diamond accuracy。
     </p>
 
     <div class="controls">
@@ -324,8 +326,9 @@
       head dim 128）的 attention-only 解析 roofline：K3V3 每值存 3.125 bit 外加 BF16 窗口（8K 下约 3.63 b/val）。
       MXFP8 的 M tile 固定为 128，而 GQA4 single-token decode 只能填 4 行；但 NVIDIA 尚未公布 LUT-B mode 的
       full-tile throughput。因此速度面板展示的是 half-rate 与 dense-FP8-rate 两个 sensitivity scenarios，
-      不是 Rubin 预测；必须拿到硬件才能确定真实值。不含 weights、MLP、sampling 与调度。完整推导见
-      <a href="#throughput">§5</a>。术语定义与原始引用：<a href="#ref-max">Lloyd–Max [1, 2]</a> 和
+      不是 Rubin 预测；必须拿到硬件才能确定真实值。不含 weights、MLP、sampling 与调度。GQA/MLA 通用模型见
+      <a href="#throughput">§5</a>，Qwen 估算见 <a href="#estimate">§6</a>，limitations 见
+      <a href="#limitations">§7</a>。术语定义与原始引用：<a href="#ref-max">Lloyd–Max [1, 2]</a> 和
       <a href="#ref-oscar">OSCAR [3]</a>。
     </div>
   </section>
@@ -659,9 +662,40 @@ effective         = 3.125 bit/value</code></pre>
       physical cache 仍会 reconstruct 成 BF16（见 <a href="#repro">Reproducibility</a>）。
     </p>
 
-    <h2 id="throughput"><span class="idx">5</span>Speed projection：Rubin 上理论能到哪里？</h2>
+    <h2 id="throughput"><span class="idx">5</span>通用性能模型：GQA、MQA 与 MLA</h2>
+    <p>
+      通用 roofline 很简单。令 <code>P_LUTB</code> 为尚未公开的 Rubin LUT-B full-tile throughput，
+      <code>B_HBM</code> 为实际 HBM bandwidth，<code>R_local</code> 为单张 GPU 上能够复用同一 compressed B tile
+      的 query rows 数量；对于 <code>T</code> 个 query tokens：
+    </p>
+<pre><code>useful M occupancy = min(R_local × T / 128, 1)
+attention throughput = min(B_HBM × arithmetic intensity,
+                           P_LUTB × useful M occupancy)</code></pre>
+    <p>
+      架构同时决定 <code>R_local</code> 与 arithmetic intensity。下表假设同一 cache tile 能在列出的 local heads
+      间复用；tensor/context parallelism 可能减少这个数量。
+    </p>
+    <div class="table-wrap"><table class="data">
+      <thead><tr><th>架构</th><th>Cache 被谁共享</th><th>T=1 时有效 A rows</th><th>理想 cache AI</th><th>Small-M 含义</th></tr></thead>
+      <tbody>
+        <tr><td>MHA</td><td>单个 query head</td><td><code>1</code></td><td><code>16 / b</code></td><td>最容易受影响</td></tr>
+        <tr><td>GQA</td><td><code>g = Hq / Hkv</code> 个 query heads</td><td><code>g</code></td><td><code>16g / b</code></td><td>GQA4 只填 4 / 128 rows</td></tr>
+        <tr><td>MQA</td><td>全部 local query heads</td><td><code>H_local</code></td><td><code>16H_local / b</code></td><td>通常填得更满</td></tr>
+        <tr><td>MLA latent</td><td>共享 <code>c_KV</code> 的全部 local heads</td><td><code>H_local</code></td><td>约 <code>32H_local / b</code></td><td>不受 GQA ratio 瓶颈约束</td></tr>
+      </tbody>
+    </table></div>
+    <p>
+      因此不能把 GQA4 的警告直接套到 MLA。
+      <a href="https://huggingface.co/moonshotai/Kimi-K3/blob/main/config.json">Kimi K3</a> 的 unsharded MLA layer
+      中，96 个 query heads 共享同一个 512-d latent，名义 row occupancy 是
+      <strong>96 / 128 = 75%</strong>，不是 4 / 128 = 3.125%。
+      MLA 避开了严重的 GQA4 underfill；但 latent 的复用率很高，仍可能变成 compute-bound。部署切分与 hybrid model
+      中非 MLA 部分的影响单独放在 <a href="#limitations">§7</a>。
+    </p>
 
-    <h3>5.1 Hardware baseline</h3>
+    <h2 id="estimate"><span class="idx">6</span>我们的估算：Qwen3-4B GQA4 Sensitivity</h2>
+
+    <h3>6.1 Hardware baseline</h3>
     <p>
       先看单 GPU hardware。H100 和 B200 可以作为 bandwidth baseline，但它们没有 SM107 的
       <code>decompress::lut::b</code>；只有 Rubin 能原生执行本文的 K3V3 LUT-B path。
@@ -688,7 +722,7 @@ effective         = 3.125 bit/value</code></pre>
       attention logical FLOPs 为 <code>4 × Q_heads × head_dim × context × layers</code>。
     </p>
 
-    <h3>5.2 如果三张卡都读取 BF16 KV</h3>
+    <h3>6.2 如果三张卡都读取 BF16 KV</h3>
     <p>BF16 KV 下 arithmetic intensity 只有 4 FLOP/B，因此三张卡都明显 HBM-bound。</p>
     <div class="table-wrap"><table class="data">
       <thead><tr><th>GPU</th><th class="num">8K BF16 roofline</th><th class="num">8K attention-only tok/s</th><th class="num">32K BF16 roofline</th><th class="num">32K attention-only tok/s</th></tr></thead>
@@ -702,7 +736,7 @@ effective         = 3.125 bit/value</code></pre>
       这里 TFLOP/s 随 context 不变，是因为 BF16 arithmetic intensity 固定；token/s 会随 context 变长而下降。
     </p>
 
-    <h3>5.3 K3V3 roofline：compressed bytes 与 B-only tile 细节</h3>
+    <h3>6.3 K3V3 roofline：compressed bytes 与 B-only tile 细节</h3>
     <p>
       K3V3 加上 BF16 sink/recent 后，8K 的 effective storage 是 3.628 bit/value，32K 是 3.251 bit/value；
       对应 arithmetic intensity 为 17.64 / 19.69 FLOP/B。
@@ -768,7 +802,7 @@ effective         = 3.125 bit/value</code></pre>
       当前 K3V3 仍为 bandwidth-bound。公开 PTX 无法告诉我们真实硬件属于哪种情况。
     </p>
 
-    <h3>5.4 拿到 Rubin 硬件前能确定什么？</h3>
+    <h3>6.4 Scenario summary</h3>
     <div class="table-wrap"><table class="data">
       <thead><tr><th class="num">Context</th><th class="num">Effective KV bits/value</th><th class="num">Byte-only HBM roofline</th><th class="num">Half-rate scenario</th><th class="num">Dense-rate scenario</th><th class="num">Scenario tok/s</th><th class="num">vs H100 BF16</th></tr></thead>
       <tbody>
@@ -778,26 +812,41 @@ effective         = 3.125 bit/value</code></pre>
     </table></div>
     <p>
       这两个 endpoint <strong>不是 prediction interval</strong>，只是说明答案对一个未公开参数有多敏感。
-      实际性能还可能更低，因为 LUT-B instruction throughput、HBM efficiency、collector reuse、descriptor、
-      TMEM movement、fused softmax pipeline 与 scheduler efficiency 都尚未在 Rubin 上实测。
+      这张表只对应 Qwen3-4B GQA4、single-token、attention-only estimate；其中 4 / 128 的 occupancy
+      不能直接套到 MLA。
     </p>
+
+    <h2 id="limitations"><span class="idx">7</span>Limitations：哪些问题必须等 Rubin 硬件？</h2>
+    <ol>
+      <li><strong>LUT-B throughput 尚未公开。</strong>CUDA 13.4 只能证明 instruction 可以编译，不能给出
+        full-tile latency 或 throughput；8.75 与 17.5 PFLOP/s 都只是 sensitivity cases。</li>
+      <li><strong>有效 rows 取决于 local schedule。</strong>GQA 使用共享同一 local KV tile 的 query heads；
+        MLA 可以使用共享同一 latent 的全部 local heads。Kimi K3 有 96 个 global heads，未切分时名义上能填
+        M=128 的 75%，不会遇到严重的 GQA4 bottleneck；但 tensor/context parallelism 会减少单张 GPU 可打包的
+        heads，因此实际 MLA occupancy 仍取决于部署。</li>
+      <li><strong>HBM 与 collector efficiency 未知。</strong>Achieved bandwidth、LUT/codebook traffic、
+        <code>B_KEEP → B_REUSE</code>、descriptor、swizzle 与 TMEM movement 必须一起实测。</li>
+      <li><strong>Rubin fused kernel 尚未实现。</strong>Softmax、同步、page-table traversal、launch overhead
+        与 scheduling 都可能把瓶颈移出孤立的 QK/PV roofline。</li>
+      <li><strong>Hybrid model 会稀释 layer-local gain。</strong>Kimi K3 只有 24 个 Gated-MLA layers，
+        另有 69 个 KDA layers，其 states 在本实验中保持原生精度；MLA attention estimate 不是整模型加速。</li>
+    </ol>
     <div class="callout">
       <strong>没有硬件就无法知道具体加速。</strong>至少需要在 fused Rubin attention kernel 上实测
-      <code>decompress::lut::b</code> full-tile throughput、small-M behavior、achieved HBM bandwidth 与
-      GQA B-collector reuse。如果完全失去 GQA reuse，8K/32K bandwidth ceiling 会降到约 97.0 / 108.3 TFLOP/s。
-      所有数字仍只是 attention-only 解析上限，不是 end-to-end output tok/s，也不是 Rubin 实机成绩。
+      <code>decompress::lut::b</code> full-tile throughput、各架构的 local row packing、achieved HBM bandwidth
+      与 collector reuse。上面的所有数字都只是解析上限，不是 Rubin silicon data。
     </div>
 
-    <h2 id="sec5"><span class="idx">6</span>这个故事目前说明了什么？</h2>
+    <h2 id="takeaways"><span class="idx">8</span>这个故事目前说明了什么？</h2>
     <ol>
       <li><strong>普通的 3-bit KV 无法承担 serving。</strong>Naive uniform INT3 直接崩溃 —— 8K PPL 从 9.468
         涨到 1504、KL₅₀ 涨到 5.15，任何 sink/recent 窗口都救不回来。</li>
       <li><strong>OSCAR + Lloyd-Max 能把质量带回来。</strong>离线 per-layer codebook 加 rotation/clipping 把
         Qwen3-4B 拉回 PPL ≈ 10.4、KL₅₀ 最低，并把 Kimi K3 的 GPQA 从 83.16% 提到 89.73% —— 全部在 ISA 规定的
         Q/P 契约（E4M3 + UE8M0 block32）下完成。</li>
-      <li><strong>Dense KV-on-LUT-B 没有 legality blocker，但有 decode-shape blocker。</strong>PTX 不要求 B
-        必须是 static weight；<code>Kᵀ</code> 和 <code>V</code> 可以成为动态 compressed B，但 B-only + MXFP8
-        M=128 会限制 single-token tile occupancy。</li>
+      <li><strong>Decode-shape 问题与架构有关。</strong>GQA4 暴露出严重的 4 / 128 small-M case；MLA 的一个
+        latent 被全部 local query heads 共享，因此不受 GQA ratio bottleneck 约束，但 sharding 仍决定它的
+        local occupancy。</li>
       <li><strong>Performance 不只看 bytes，而且公开信息还不够。</strong>只算 bytes 是 H100 BF16 的 29–32×；
         half-rate LUT-B sensitivity case 是 20.4×，而达到公开 dense FP8 rate 时仍是 29–32×。只有 Rubin
         硬件才能给出真实 tile throughput 与具体加速。</li>
@@ -808,7 +857,7 @@ effective         = 3.125 bit/value</code></pre>
 <pre><code>git clone https://github.com/FutureMLS-Lab/OSCAR.git &amp;&amp; cd OSCAR
 git checkout zhongzhu/oscar-int3-rubin-simulate</code></pre>
     <ul>
-      <li><strong>Speed tables（§5）：</strong><code>python3 rubin/rubin_k3v3_roofline.py --compare-hardware</code>
+      <li><strong>Speed tables（§6）：</strong><code>python3 rubin/rubin_k3v3_roofline.py --compare-hardware</code>
         —— 只依赖 Python 标准库。</li>
       <li><strong>ISA compile proof：</strong><code>rubin/run_compile_probes.py
         --cuda /usr/local/cuda-13.4</code> —— 需要 CUDA 13.4 preview toolchain；校验生成的 SASS 包含
@@ -928,7 +977,7 @@ const MODELS = {
   },
 };
 
-/* 速度模型（attention-only 解析 roofline，与 §5 一致） */
+/* 速度模型（Qwen3-4B attention-only sensitivity scenarios，与 §6 一致） */
 const MODEL = { layers: 36, qHeads: 32, kvHeads: 8, headDim: 128 };
 const HI_WINDOW = 320;                       // BF16 sink 64 + recent 256
 const TILE_UTIL = 4 / 128;                   // MXFP8 M=128，4 个有效 GQA rows
@@ -1130,7 +1179,7 @@ function renderSpeed() {
     const hint = document.createElement("div");
     hint.className = "chart-hint";
     hint.style.textAlign = "left";
-    hint.textContent = "Rubin \u901f\u5ea6 roofline \u4ec5\u5bf9 Qwen3-4B GQA decode \u5efa\u6a21\uff0c\u89c1 \u00a75\u3002";
+    hint.textContent = "Rubin \u901f\u5ea6 scenarios \u4ec5\u5bf9 Qwen3-4B GQA decode \u5efa\u6a21\uff0c\u89c1 \u00a76\u3002";
     host0.appendChild(hint);
     return;
   }
@@ -1176,7 +1225,7 @@ function renderCaption() {
     } else {
       khtml = p.desc + "\u5728\u516c\u5f00\u7684 2.8T checkpoint \u4e0a\uff0832\u00d7H100\u3001patched SGLang\uff09\uff1aPPL <b>" + p.ppl.toFixed(3) +
         "</b> \u00b7 KL\u2085\u2080 <b>" + p.kl.toFixed(5) + "</b> \u00b7 GPQA <b>" + p.gpqa +
-        "</b>\uff08\u4e09\u79cd\u5b50\u5747\u503c\uff09\u3002\u901f\u5ea6\u9762\u677f\u4ec5\u5bf9 Qwen3-4B \u5efa\u6a21\uff0c\u89c1 \u00a75\u3002";
+        "</b>\uff08\u4e09\u79cd\u5b50\u5747\u503c\uff09\u3002\u901f\u5ea6\u9762\u677f\u4ec5\u5bf9 Qwen3-4B \u5efa\u6a21\uff0c\u89c1 \u00a76\u3002";
     }
     $("hxCaption").innerHTML = khtml;
     return;
