@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Vera Rubin 能支持 3-bit KV Attention 吗？精度模拟揭示真相</title>
-<meta name="description" content="把 3-bit LUT-B KV cache 映射到 NVIDIA Vera Rubin 的 attention：Lloyd-Max codebook 与 OSCAR rotation 的精度模拟、CUDA 13.4 编译探测，以及经 operand 修正的 roofline 估算。">
+<title>Vera Rubin 能在 1M Tokens 下支持 3-bit KV 吗？</title>
+<meta name="description" content="Vera Rubin 3-bit LUT-B 在 1M-token 场景下对 weight 与 KV-cache bottleneck 的容量和性能分析，包括实测精度模拟与依赖硬件参数的 roofline scenarios。">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;0,6..72,700;1,6..72,400;1,6..72,500&family=Noto+Sans+SC:wght@400;500;600;700&family=Noto+Serif+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -58,16 +58,17 @@
     padding: 64px 0 8px;
     text-align: center;
   }
+  header.paper .wrap { max-width: 1200px; padding: 0 12px; }
   h1.title {
     font-family: var(--serif);
     font-weight: 600;
-    font-size: clamp(24px, 3vw, 32px);
-    line-height: 1.4;
+    font-size: clamp(12.5px, 2.35vw, 32px);
+    line-height: 1.2;
     margin: 0 auto 10px;
-    max-width: 860px;
+    max-width: none;
+    white-space: nowrap;
     color: var(--ink);
   }
-  h1.title .subtitle-line { display: block; font-size: .7em; font-weight: 500; color: var(--ink-2); margin-top: 6px; }
   .meta { font-family: var(--serif); font-size: 14px; color: var(--muted); }
   .meta a { color: var(--accent); text-decoration: none; border-bottom: 1px solid rgba(138,106,20,.35); }
   .head-rule { border: 0; border-top: 1.5px solid var(--ink-2); margin: 26px auto 0; opacity: .55; }
@@ -243,9 +244,7 @@
 
 <header class="paper">
   <div class="wrap">
-    <h1 class="title">Vera Rubin 能支持 3-bit KV Attention 吗？
-      <span class="subtitle-line">一次精度模拟揭示真相</span>
-    </h1>
+    <h1 class="title">Vera Rubin 能在 1M Tokens 下支持 3-bit KV 吗？</h1>
     <div class="meta">2026 年 8 月 7 日</div>
     <hr class="head-rule">
   </div>
@@ -323,7 +322,8 @@
       Rubin 硬件 Q/P 契约（E4M3 + UE8M0 block32）；
       uniform 与 OSCAR INT2 两行以 BF16 Q/P 测得。Kimi K3 只量化 24 个 Gated-MLA 层的 512-d MLA latent；
       Kimi PPL 沿用 native 的 last-2048-NLL protocol，不可跨模型比较。<b>速度。</b>针对 Qwen3-4B decode（36 层 · 32 Q / 8 KV heads ·
-      head dim 128）的 attention-only 解析 roofline：K3V3 每值存 3.125 bit 外加 BF16 窗口（8K 下约 3.63 b/val）。
+      head dim 128）的 attention-only 解析 roofline：K3V3 每值存 3.125 bit 外加 BF16 窗口（8K 下约
+      3.63 b/val，1M 下约 3.13）。
       MXFP8 的 M tile 固定为 128，而 GQA4 single-token decode 只能填 4 行；但 NVIDIA 尚未公布 LUT-B mode 的
       full-tile throughput。因此速度面板展示的是 half-rate 与 dense-FP8-rate 两个 sensitivity scenarios，
       不是 Rubin 预测；必须拿到硬件才能确定真实值。不含 weights、MLP、sampling 与调度。GQA/MLA 通用模型见
@@ -341,16 +341,16 @@
       <ol>
         <li><strong>Rubin 提供了什么？</strong>22 TB/s 的 HBM4，以及能在矩阵乘法内部把 3-bit index 解压成
           8 个 E4M3 数值的 LUT-B Tensor Core。</li>
-        <li><strong>Attention 怎么用它？</strong>把 <code>Kᵀ</code> 和 <code>V</code> 存成 3-bit LUT-B operand；
-          Q 和 softmax 后的 P 以 MXFP8 留在 A，两次乘法都直接消费压缩 KV。</li>
+        <li><strong>它能解决什么？</strong>静态 3-bit weight 是最自然的 B operand，但动态 <code>Kᵀ</code> 与
+          <code>V</code> 同样合法。Q 和 softmax 后的 P 以 MXFP8 留在 A，因此 Rubin 可以同时针对 model-weight
+          bandwidth 与被反复读取的 KV-cache bottleneck。</li>
         <li><strong>为什么不能直接用朴素 INT3？</strong>Outlier 会毁掉它：Qwen3-4B 的 8K PPL 从 9.468 暴涨到
           1504。离线 Lloyd–Max<span class="cite"><a href="#ref-max">[1]</a><a href="#ref-lloyd">[2]</a></span>
           codebook —— 加上 OSCAR<span class="cite"><a href="#ref-oscar">[3]</a></span> rotation 和 BF16
           sink/recent 窗口 —— 能拉回到约 10.4。</li>
-        <li><strong>能快多少？</strong>只算 bytes 允许达到 H100 BF16 的 29–32×。B-only、M=128 tile 可能降低
-          这个数字：half-dense-rate LUT-B scenario 约为 20.4×；若 LUT-B 能达到官方 17.5 PFLOP/s dense FP8
-          rate，则仍为 bandwidth-bound 的 29–32×。公开 PTX 只能证明 instruction 合法，不能给出吞吐；
-          具体加速必须等 Rubin 硬件测量。</li>
+        <li><strong>1M tokens 下会怎样？</strong>对于 Qwen3-4B 的 GQA geometry，单条 BF16 KV sequence
+          约为 154.6 GB；K3V3 可降到约 30.2 GB。Attention-only sensitivity cases 相对 H100 BF16 为
+          20.4×–33.6×，但公开 PTX 只能证明 instruction 合法，不能给出吞吐；具体加速必须等 Rubin 硬件测量。</li>
       </ol>
     </div>
 
@@ -460,6 +460,25 @@ effective         = 3.125 bit/value</code></pre>
       这些 probes 证明的是 compiler acceptance 和 SASS emission，不是 Rubin runtime correctness。
       CUDA 13.4 Developer Preview 也明确禁止用 preview performance data 表征硬件。
     </div>
+
+    <h3>2.3 3-bit weight 是最自然的 LUT-B 用法，KV 使用同一个 primitive</h3>
+    <div class="table-wrap"><table class="data">
+      <thead><tr><th>目标</th><th>MXFP8 A</th><th>3-bit LUT-B</th><th>解决的 bottleneck</th><th>仍然困难的部分</th></tr></thead>
+      <tbody>
+        <tr><td>Weight W3A8</td><td>activation <code>X</code></td><td>离线 pack 的 <code>Wᵀ</code></td><td>模型 weight 容量与 decode weight bandwidth</td><td>量化精度与 small-batch M occupancy</td></tr>
+        <tr><td>KV K3V3</td><td>先 <code>Q</code>、后 <code>P</code></td><td>动态 <code>Kᵀ</code>、后 <code>V</code></td><td>长上下文 KV 容量与反复读取的 HBM traffic</td><td>runtime packing、paged layout、operand 方向与 row packing</td></tr>
+      </tbody>
+    </table></div>
+    <p>
+      Weight 映射更简单：<code>Y = X × Wᵀ</code> 天然把静态、可离线 transpose 的 weight matrix 放在 B；
+      每个 64 × 8 granule 可以提前 pack 成 512 个 indices 加一张 8-value E4M3 LUT。这是
+      <strong>3-bit storage + E4M3 reconstruction</strong>，不是普通 INT3 arithmetic。
+    </p>
+    <p>
+      这条 instruction 并不要求 B 必须是 static weight。动态 <code>Kᵀ</code> 与 <code>V</code> 同样可以成为
+      B operand，因此 Rubin 也能把相同的 in-MMA lookup 用到 KV-cache bottleneck：长上下文 decode 会反复读取
+      历史 KV，减少这些 bytes 可以同时缓解容量和 HBM traffic。KV 更难实现，但并不是次要用途。
+    </p>
 
     <h2 id="sec3"><span class="idx">3</span>我们做了什么：把 LUT-B 映射到 attention</h2>
     <p>
@@ -735,11 +754,16 @@ attention throughput = min(B_HBM × arithmetic intensity,
     <p>
       这里 TFLOP/s 随 context 不变，是因为 BF16 arithmetic intensity 固定；token/s 会随 context 变长而下降。
     </p>
+    <p>
+      1M tokens 下，Qwen3-4B 单条 BF16 KV sequence 在 36 层合计约 <strong>154.6 GB</strong>。
+      Attention-only BF16 bandwidth ceilings 分别是 H100 21.7 tok/s、B200 51.7 tok/s、Rubin 142.3 tok/s。
+    </p>
 
     <h3>6.3 K3V3 roofline：compressed bytes 与 B-only tile 细节</h3>
     <p>
-      K3V3 加上 BF16 sink/recent 后，8K 的 effective storage 是 3.628 bit/value，32K 是 3.251 bit/value；
-      对应 arithmetic intensity 为 17.64 / 19.69 FLOP/B。
+      K3V3 加上 BF16 sink/recent 后，8K 的 effective storage 是 3.628 bit/value，32K 是 3.251，
+      1M 是 3.129；对应 arithmetic intensity 为 17.64 / 19.69 / 20.45 FLOP/B。1M 下 Qwen3-4B 的 KV
+      footprint 从 154.6 GB 降到约 <strong>30.2 GB</strong>。
     </p>
     <div class="table-wrap"><table class="data">
       <thead><tr><th>GPU</th><th class="num">8K compressed-byte roofline</th><th class="num">8K tok/s</th><th class="num">32K compressed-byte roofline</th><th class="num">32K tok/s</th><th>能否原生执行</th></tr></thead>
@@ -778,11 +802,11 @@ attention throughput = min(B_HBM × arithmetic intensity,
       GQA ratio 是 4，所以一个共享 K/V tile 最多把 4 个 Q heads 打包成 4 行：
     </p>
     <div class="table-wrap"><table class="data">
-      <thead><tr><th>Full-tile LUT-B scenario</th><th class="num">M occupancy</th><th class="num">Logical tile cap</th><th class="num">8K bound</th><th class="num">32K bound</th></tr></thead>
+      <thead><tr><th>Full-tile LUT-B scenario</th><th class="num">M occupancy</th><th class="num">Logical tile cap</th><th class="num">8K bound</th><th class="num">32K bound</th><th class="num">1M bound</th></tr></thead>
       <tbody>
-        <tr><td>Half dense rate：8.75 PFLOP/s<br><span class="faint">仅用于 sensitivity，不是规格</span></td><td class="num">4 / 128 = <strong>3.125%</strong></td><td class="num">273.4 TFLOP/s</td><td class="num">273.4 TFLOP/s<br>tile-bound</td><td class="num">273.4 TFLOP/s<br>tile-bound</td></tr>
-        <tr><td>Public dense FP8 rate：17.5 PFLOP/s<br><span class="faint">假设 LUT-B 与 dense FP8 同速</span></td><td class="num">4 / 128 = <strong>3.125%</strong></td><td class="num">546.9 TFLOP/s</td><td class="num">388.1 TFLOP/s<br>HBM-bound</td><td class="num">433.1 TFLOP/s<br>HBM-bound</td></tr>
-        <tr><td><strong>Rubin LUT-B hardware</strong></td><td class="num">取决于 schedule</td><td class="num"><strong>未知</strong></td><td class="num"><strong>需要实测</strong></td><td class="num"><strong>需要实测</strong></td></tr>
+        <tr><td>Half dense rate：8.75 PFLOP/s<br><span class="faint">仅用于 sensitivity，不是规格</span></td><td class="num">4 / 128 = <strong>3.125%</strong></td><td class="num">273.4 TFLOP/s</td><td class="num">273.4<br>tile-bound</td><td class="num">273.4<br>tile-bound</td><td class="num">273.4<br>tile-bound</td></tr>
+        <tr><td>Public dense FP8 rate：17.5 PFLOP/s<br><span class="faint">假设 LUT-B 与 dense FP8 同速</span></td><td class="num">4 / 128 = <strong>3.125%</strong></td><td class="num">546.9 TFLOP/s</td><td class="num">388.1<br>HBM-bound</td><td class="num">433.1<br>HBM-bound</td><td class="num">450.0<br>HBM-bound</td></tr>
+        <tr><td><strong>Rubin LUT-B hardware</strong></td><td class="num">取决于 schedule</td><td class="num"><strong>未知</strong></td><td class="num"><strong>实测</strong></td><td class="num"><strong>实测</strong></td><td class="num"><strong>实测</strong></td></tr>
       </tbody>
     </table></div>
     <p>
@@ -796,10 +820,11 @@ attention throughput = min(B_HBM × arithmetic intensity,
     </p>
     <p>
       区分两种 regime 所需的 full-tile LUT-B throughput 是：8K 下 <strong>12.42 PFLOP/s</strong>，32K 下
-      <strong>13.86 PFLOP/s</strong>。低于该值时模型是 tile-bound，高于该值时是 HBM-bound。在 8.75-PFLOP/s
-      sensitivity case 中，转折发生在 5.15 effective bits/value（计入 BF16 窗口后，8K 的 body threshold
-      是 4.71 bit）；若 LUT-B 能达到公开的 17.5-PFLOP/s dense rate，转折点降到 2.57 effective bits/value，
-      当前 K3V3 仍为 bandwidth-bound。公开 PTX 无法告诉我们真实硬件属于哪种情况。
+      <strong>13.86 PFLOP/s</strong>，1M 下 <strong>14.40 PFLOP/s</strong>。低于该值时模型是 tile-bound，
+      高于该值时是 HBM-bound。在 8.75-PFLOP/s sensitivity case 中，转折发生在 5.15 effective bits/value
+      （计入 BF16 窗口后，8K 的 body threshold 是 4.71 bit）；若 LUT-B 能达到公开的 17.5-PFLOP/s dense
+      rate，转折点降到 2.57 effective bits/value，当前 K3V3 仍为 bandwidth-bound。公开 PTX 无法告诉我们
+      真实硬件属于哪种情况。
     </p>
 
     <h3>6.4 Scenario summary</h3>
@@ -808,6 +833,7 @@ attention throughput = min(B_HBM × arithmetic intensity,
       <tbody>
         <tr><td class="num">8K</td><td class="num">3.628</td><td class="num">388.1 TFLOP/s</td><td class="num">273.4 TFLOP/s</td><td class="num">388.1 TFLOP/s</td><td class="num">56.59K / 80.32K</td><td class="num">20.4× / 29.0×</td></tr>
         <tr><td class="num">32K</td><td class="num">3.251</td><td class="num">433.1 TFLOP/s</td><td class="num">273.4 TFLOP/s</td><td class="num">433.1 TFLOP/s</td><td class="num">14.15K / 22.41K</td><td class="num">20.4× / 32.3×</td></tr>
+        <tr><td class="num">1M</td><td class="num">3.129</td><td class="num">450.0 TFLOP/s</td><td class="num">273.4 TFLOP/s</td><td class="num">450.0 TFLOP/s</td><td class="num">442 / 728</td><td class="num">20.4× / 33.6×</td></tr>
       </tbody>
     </table></div>
     <p>
@@ -830,6 +856,8 @@ attention throughput = min(B_HBM × arithmetic intensity,
         与 scheduling 都可能把瓶颈移出孤立的 QK/PV roofline。</li>
       <li><strong>Hybrid model 会稀释 layer-local gain。</strong>Kimi K3 只有 24 个 Gated-MLA layers，
         另有 69 个 KDA layers，其 states 在本实验中保持原生精度；MLA attention estimate 不是整模型加速。</li>
+      <li><strong>1M 是 systems target，不是实测质量点。</strong>标题中的 1M tokens 指容量与解析 decode
+        scenarios；PPL/KL 只测到 8K，GPQA 也不能验证 1M-context retrieval 或 generation quality。</li>
     </ol>
     <div class="callout">
       <strong>没有硬件就无法知道具体加速。</strong>至少需要在 fused Rubin attention kernel 上实测
@@ -844,12 +872,13 @@ attention throughput = min(B_HBM × arithmetic intensity,
       <li><strong>OSCAR + Lloyd-Max 能把质量带回来。</strong>离线 per-layer codebook 加 rotation/clipping 把
         Qwen3-4B 拉回 PPL ≈ 10.4、KL₅₀ 最低，并把 Kimi K3 的 GPQA 从 83.16% 提到 89.73% —— 全部在 ISA 规定的
         Q/P 契约（E4M3 + UE8M0 block32）下完成。</li>
+      <li><strong>一个 LUT-B primitive 可以解决两类 bandwidth 问题。</strong>W3A8 是最自然的 static-weight
+        mapping；动态 K3V3 更难实现，但可以直接减少长上下文 decode 的 KV 容量与反复读取流量。</li>
       <li><strong>Decode-shape 问题与架构有关。</strong>GQA4 暴露出严重的 4 / 128 small-M case；MLA 的一个
         latent 被全部 local query heads 共享，因此不受 GQA ratio bottleneck 约束，但 sharding 仍决定它的
         local occupancy。</li>
-      <li><strong>Performance 不只看 bytes，而且公开信息还不够。</strong>只算 bytes 是 H100 BF16 的 29–32×；
-        half-rate LUT-B sensitivity case 是 20.4×，而达到公开 dense FP8 rate 时仍是 29–32×。只有 Rubin
-        硬件才能给出真实 tile throughput 与具体加速。</li>
+      <li><strong>Performance 不只看 bytes，而且公开信息还不够。</strong>1M 下 Qwen GQA4 scenarios 相对
+        H100 BF16 为 20.4×–33.6×；只有 Rubin 硬件才能给出真实 tile throughput 与具体加速。</li>
     </ol>
 
     <h2 id="repro">Reproducibility</h2>
@@ -983,7 +1012,7 @@ const HI_WINDOW = 320;                       // BF16 sink 64 + recent 256
 const TILE_UTIL = 4 / 128;                   // MXFP8 M=128，4 个有效 GQA rows
 const LUTB_HALF_RATE = 8.75e15;              // sensitivity case，不是规格
 const RUBIN_DENSE_FP8 = 17.5e15;             // NVIDIA 公布的 dense FP8/FP6 rate
-const CTX_LABEL = { 8192: "8K", 32768: "32K" };
+const CTX_LABEL = { 8192: "8K", 32768: "32K", 1048576: "1M" };
 const flopsPerTok = (ctx) => 4 * MODEL.qHeads * MODEL.headDim * ctx * MODEL.layers;
 const bf16Bytes = (ctx) => 2 * MODEL.kvHeads * MODEL.headDim * 2 * ctx * MODEL.layers;
 const effBitsCtx = (ctx) => (HI_WINDOW * 16 + (ctx - HI_WINDOW) * 3.125) / ctx;
@@ -999,7 +1028,7 @@ function speedAt(ctx) {
   return { fl, bB, bK, h100, rubinBF16, byte, halfRate, denseRate };
 }
 
-const hx = { model: "qwen", preset: "oscar_lm", ctx: 8192 };
+const hx = { model: "qwen", preset: "oscar_lm", ctx: 1048576 };
 const curModel = () => MODELS[hx.model];
 const curPreset = () => {
   const M = curModel();
@@ -1264,7 +1293,7 @@ function render() {
   });
   const M = curModel();
   seg("segPreset", M.presets.map(p => [p.key, p.label]), hx.preset, (k) => { hx.preset = k; render(); });
-  seg("segCtx", [[8192, "8K"], [32768, "32K"]], hx.ctx, (k) => { hx.ctx = +k; render(); });
+  seg("segCtx", [[8192, "8K"], [32768, "32K"], [1048576, "1M"]], hx.ctx, (k) => { hx.ctx = +k; render(); });
   $("ctxCtrl").style.display = M.speed ? "" : "none";
   renderAccuracy();
   renderSpeed();
