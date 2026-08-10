@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Vera Rubin 能在 1M Tokens 下支持 3-bit KV 吗？</title>
-<meta name="description" content="Vera Rubin 3-bit LUT-B 在 1M-token 场景下对 weight 与 KV-cache bottleneck 的容量和性能分析，包括实测精度模拟与依赖硬件参数的 roofline scenarios。">
+<title>Vera Rubin 能用 3-bit KV 支持 10M-Token Context 吗？</title>
+<meta name="description" content="Vera Rubin 3-bit LUT-B 的 TP8 HBM 容量分析：10M-token MLA KV target、weight 与 KV-cache bottleneck、实测精度模拟及依赖硬件参数的 roofline scenarios。">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;0,6..72,700;1,6..72,400;1,6..72,500&family=Noto+Sans+SC:wght@400;500;600;700&family=Noto+Serif+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -62,7 +62,7 @@
   h1.title {
     font-family: var(--serif);
     font-weight: 600;
-    font-size: clamp(12.5px, 2.35vw, 32px);
+    font-size: clamp(10.5px, 2.35vw, 32px);
     line-height: 1.2;
     margin: 0 auto 10px;
     max-width: none;
@@ -244,7 +244,7 @@
 
 <header class="paper">
   <div class="wrap">
-    <h1 class="title">Vera Rubin 能在 1M Tokens 下支持 3-bit KV 吗？</h1>
+    <h1 class="title">Vera Rubin 能用 3-bit KV 支持 10M-Token Context 吗？</h1>
     <div class="meta">2026 年 8 月 7 日</div>
     <hr class="head-rule">
   </div>
@@ -348,9 +348,10 @@
           1504。离线 Lloyd–Max<span class="cite"><a href="#ref-max">[1]</a><a href="#ref-lloyd">[2]</a></span>
           codebook —— 加上 OSCAR<span class="cite"><a href="#ref-oscar">[3]</a></span> rotation 和 BF16
           sink/recent 窗口 —— 能拉回到约 10.4。</li>
-        <li><strong>1M tokens 下会怎样？</strong>对于 Qwen3-4B 的 GQA geometry，单条 BF16 KV sequence
-          约为 154.6 GB；K3V3 可降到约 30.2 GB。Attention-only sensitivity cases 相对 H100 BF16 为
-          20.4×–33.6×，但公开 PTX 只能证明 instruction 合法，不能给出吞吐；具体加速必须等 Rubin 硬件测量。</li>
+        <li><strong>为什么选择 10M？</strong>在 Kimi K3 MLA TP8 thought experiment 中，1.56-TB weights
+          完美切分后，每张 288-GB Rubin 剩 93 GB。10M-token K3V3 latent 加 native RoPE 使用 78.7 GB，
+          每 GPU 还剩 <strong>14.3 GB</strong> 给 runtime。零预留数学极限是 11.81M；当前 checkpoint
+          本身仍然只支持 1M context。</li>
       </ol>
     </div>
 
@@ -712,9 +713,46 @@ attention throughput = min(B_HBM × arithmetic intensity,
       中非 MLA 部分的影响单独放在 <a href="#limitations">§7</a>。
     </p>
 
-    <h2 id="estimate"><span class="idx">6</span>我们的估算：Qwen3-4B GQA4 Sensitivity</h2>
+    <h2 id="estimate"><span class="idx">6</span>我们的估算：TP8 MLA 容量与 Qwen GQA4 速度</h2>
 
-    <h3>6.1 Hardware baseline</h3>
+    <h3>6.1 TP8 MLA HBM 容量极限</h3>
+    <p>
+      标题中的 10M 是低于数学极限的取整容量目标，不代表当前 Kimi K3 已经支持 10M context。假设 8 张
+      288-GB Rubin、1.56-TB MXFP4 checkpoint 完美切分、24 个 Gated-MLA layers、512-d K3V3 latent，
+      以及保持原生精度的 64-d BF16 RoPE suffix：
+    </p>
+    <div class="table-wrap"><table class="data">
+      <thead><tr><th>Quantity</th><th class="num">Value</th><th>Derivation</th></tr></thead>
+      <tbody>
+        <tr><td>TP8 aggregate HBM</td><td class="num">2.304 TB</td><td><code>8 × 288 GB</code></td></tr>
+        <tr><td>每 GPU weight footprint</td><td class="num">195 GB</td><td><code>1.56 TB / 8</code></td></tr>
+        <tr><td>每 GPU 理想剩余 HBM</td><td class="num">93 GB</td><td><code>288 − 195 GB</code></td></tr>
+        <tr><td>每 MLA layer/token 的 K3V3 latent</td><td class="num">200 B</td><td><code>512 × 3.125 / 8</code></td></tr>
+        <tr><td>每 layer/token 的 native RoPE suffix</td><td class="num">128 B</td><td><code>64 × 2</code></td></tr>
+        <tr><td>24 个 MLA layers 每 token</td><td class="num">7.872 KB</td><td><code>24 × (200 + 128)</code></td></tr>
+        <tr><td><strong>零预留 context ceiling</strong></td><td class="num"><strong>11.81M</strong></td><td>包含 320-token BF16 window</td></tr>
+      </tbody>
+    </table></div>
+<pre><code>24 × [320 × 1152 B + (L − 320) × 328 B] ≤ 93 GB
+L ≤ 11.81M tokens</code></pre>
+    <div class="table-wrap"><table class="data">
+      <thead><tr><th>每 GPU runtime reserve</th><th class="num">KV budget</th><th class="num">Context ceiling</th></tr></thead>
+      <tbody>
+        <tr><td>0 GB — 数学极限</td><td class="num">93.0 GB</td><td class="num">11.81M</td></tr>
+        <tr><td>9.3 GB — 剩余 HBM 的 10%</td><td class="num">83.7 GB</td><td class="num">10.63M</td></tr>
+        <tr><td><strong>14.3 GB — 10M headline</strong></td><td class="num"><strong>78.7 GB</strong></td><td class="num"><strong>10.00M</strong></td></tr>
+        <tr><td>20 GB</td><td class="num">73.0 GB</td><td class="num">9.27M</td></tr>
+        <tr><td>30 GB</td><td class="num">63.0 GB</td><td class="num">8.00M</td></tr>
+      </tbody>
+    </table></div>
+    <p>
+      普通 tensor parallelism 不会把 context limit 再乘 8：共享 MLA latent 通常会复制到各 TP ranks。
+      单独设计 sequence/context-parallel KV sharding，aggregate 数学上限可以接近 94.5M，但会引入另一套通信与
+      kernel 问题。Loaded weight memory、allocator fragmentation、workspace、activation，以及模型原生的
+      1M positional limit 都使 11.81M 只能作为 upper bound，而不是可直接部署的配置。
+    </p>
+
+    <h3>6.2 Hardware baseline</h3>
     <p>
       先看单 GPU hardware。H100 和 B200 可以作为 bandwidth baseline，但它们没有 SM107 的
       <code>decompress::lut::b</code>；只有 Rubin 能原生执行本文的 K3V3 LUT-B path。
@@ -741,7 +779,7 @@ attention throughput = min(B_HBM × arithmetic intensity,
       attention logical FLOPs 为 <code>4 × Q_heads × head_dim × context × layers</code>。
     </p>
 
-    <h3>6.2 如果三张卡都读取 BF16 KV</h3>
+    <h3>6.3 如果三张卡都读取 BF16 KV</h3>
     <p>BF16 KV 下 arithmetic intensity 只有 4 FLOP/B，因此三张卡都明显 HBM-bound。</p>
     <div class="table-wrap"><table class="data">
       <thead><tr><th>GPU</th><th class="num">8K BF16 roofline</th><th class="num">8K attention-only tok/s</th><th class="num">32K BF16 roofline</th><th class="num">32K attention-only tok/s</th></tr></thead>
@@ -759,7 +797,7 @@ attention throughput = min(B_HBM × arithmetic intensity,
       Attention-only BF16 bandwidth ceilings 分别是 H100 21.7 tok/s、B200 51.7 tok/s、Rubin 142.3 tok/s。
     </p>
 
-    <h3>6.3 K3V3 roofline：compressed bytes 与 B-only tile 细节</h3>
+    <h3>6.4 K3V3 roofline：compressed bytes 与 B-only tile 细节</h3>
     <p>
       K3V3 加上 BF16 sink/recent 后，8K 的 effective storage 是 3.628 bit/value，32K 是 3.251，
       1M 是 3.129；对应 arithmetic intensity 为 17.64 / 19.69 / 20.45 FLOP/B。1M 下 Qwen3-4B 的 KV
@@ -827,7 +865,7 @@ attention throughput = min(B_HBM × arithmetic intensity,
       真实硬件属于哪种情况。
     </p>
 
-    <h3>6.4 Scenario summary</h3>
+    <h3>6.5 Scenario summary</h3>
     <div class="table-wrap"><table class="data">
       <thead><tr><th class="num">Context</th><th class="num">Effective KV bits/value</th><th class="num">Byte-only HBM roofline</th><th class="num">Half-rate scenario</th><th class="num">Dense-rate scenario</th><th class="num">Scenario tok/s</th><th class="num">vs H100 BF16</th></tr></thead>
       <tbody>
@@ -856,8 +894,9 @@ attention throughput = min(B_HBM × arithmetic intensity,
         与 scheduling 都可能把瓶颈移出孤立的 QK/PV roofline。</li>
       <li><strong>Hybrid model 会稀释 layer-local gain。</strong>Kimi K3 只有 24 个 Gated-MLA layers，
         另有 69 个 KDA layers，其 states 在本实验中保持原生精度；MLA attention estimate 不是整模型加速。</li>
-      <li><strong>1M 是 systems target，不是实测质量点。</strong>标题中的 1M tokens 指容量与解析 decode
-        scenarios；PPL/KL 只测到 8K，GPQA 也不能验证 1M-context retrieval 或 generation quality。</li>
+      <li><strong>10M 是 HBM capacity target，不是已支持或实测的 context。</strong>当前 Kimi K3 checkpoint
+        的 positional limit 是 1M；PPL/KL 只测到 8K，GPQA 也不能验证 million-token retrieval 或
+        generation quality。</li>
     </ol>
     <div class="callout">
       <strong>没有硬件就无法知道具体加速。</strong>至少需要在 fused Rubin attention kernel 上实测
@@ -877,6 +916,9 @@ attention throughput = min(B_HBM × arithmetic intensity,
       <li><strong>Decode-shape 问题与架构有关。</strong>GQA4 暴露出严重的 4 / 128 small-M case；MLA 的一个
         latent 被全部 local query heads 共享，因此不受 GQA ratio bottleneck 约束，但 sharding 仍决定它的
         local occupancy。</li>
+      <li><strong>10M headline 保留了有限但非零的 HBM headroom。</strong>完美 weight sharding 下零 workspace
+        ceiling 为 11.81M；选择 10M 会使用每 GPU 93 GB 剩余空间中的 78.7 GB，留下 14.3 GB，还没有计入模型
+        原生的 1M positional limit。</li>
       <li><strong>Performance 不只看 bytes，而且公开信息还不够。</strong>1M 下 Qwen GQA4 scenarios 相对
         H100 BF16 为 20.4×–33.6×；只有 Rubin 硬件才能给出真实 tile throughput 与具体加速。</li>
     </ol>
