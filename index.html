@@ -825,7 +825,7 @@ L ≤ 11.81M tokens</code></pre>
       <code>Q × Kᵀ</code> / <code>P × V</code> 的方向。
     </p>
     <p>
-      有读者向我们指出了最新的 decode kernel，这个观察是对的：
+      我们在审计最新的 decode path 时发现：
       <a href="https://github.com/flashinfer-ai/flashinfer/blob/b1d95851675b8799d623df4d5a7d6eac3254b3ff/flashinfer/cute_dsl/attention/gqa_decode_paged.py#L222-L259">FlashInfer SM100 CuTe GQA decode kernel</a>
       明确设置 <code>mma_tile_m=128</code>；GEMM1 的 A 是 K、B 是 Q，GEMM2 的 A 是 V、B 是 P。它让
       sequence/head-dim 填满 A 的 M 方向，并把 GQA heads × prediction tokens 填进 B 的 N 方向。需要同时区分
