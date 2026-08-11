@@ -893,6 +893,10 @@ L ≤ 11.81M tokens</code></pre>
         <code>B_KEEP → B_REUSE</code>、descriptor、swizzle 与 TMEM movement 必须一起实测。</li>
       <li><strong>Rubin fused kernel 尚未实现。</strong>Softmax、同步、page-table traversal、launch overhead
         与 scheduling 都可能把瓶颈移出孤立的 QK/PV roofline。</li>
+      <li><strong>速度估算没有计入 rotation overhead。</strong>当前 fake-quant path 会在量化前后执行 dense
+        <code>R</code> 与 <code>Rᵀ</code>。Production implementation 应尽量把固定变换 fold 进 Q/K/V 或 MLA
+        up/down projections，或者把 structured rotation fuse 到只执行一次的 cache write；剩余 rotation、
+        clipping 与 index assignment 成本仍需单独评估。</li>
       <li><strong>QAT 是很有价值的 future exploration。</strong>Quantization-aware training 可以让模型直接适应
         精确的 3-bit indices、E4M3 LUT centroids、可选 UE8M0 B scales、clipping 与 absorbed projections，
         而不是在冻结 checkpoint 后再补偿量化误差。本文目前没有 QAT result。</li>
