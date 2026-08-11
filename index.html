@@ -128,15 +128,14 @@
   #tip .t-row { display: flex; justify-content: space-between; gap: 16px; color: #c9c2ac; }
   #tip .t-row b { color: #fff; font-family: var(--mono); font-weight: 600; }
 
-  .bar-row { display: grid; grid-template-columns: 128px 1fr; gap: 12px; align-items: center; padding: 6px 0; }
+  .bar-row { display: grid; grid-template-columns: 128px minmax(0, 1fr) 96px; gap: 10px; align-items: center; padding: 6px 0; }
   .bar-name { font-size: 12.5px; font-weight: 600; color: var(--ink-2); line-height: 1.3; font-family: var(--sans); }
-  .bar-track { position: relative; height: 21px; background: #eeeadb; border-radius: 4px; overflow: visible; }
+  .bar-track { position: relative; height: 21px; background: #eeeadb; border-radius: 4px; overflow: hidden; }
   .bar-track.na { background: repeating-linear-gradient(135deg, #efebdd 0 8px, #e6e1cf 8px 16px); }
-  .bar-ghost { position: absolute; inset: 0; display: flex; align-items: center; padding-left: 10px; font-size: 11px; font-weight: 500; color: var(--faint); }
   .bar-fill { position: absolute; inset: 0 auto 0 0; border-radius: 4px; min-width: 3px; transition: width .35s cubic-bezier(.2,.8,.25,1); }
   .bar-val {
-    position: absolute; top: 50%; transform: translateY(-50%);
-    font-family: var(--mono); font-size: 12px; font-weight: 600; white-space: nowrap; font-variant-numeric: tabular-nums;
+    font-family: var(--mono); font-size: 11.5px; font-weight: 600; white-space: nowrap;
+    font-variant-numeric: tabular-nums; text-align: right; color: var(--ink-2);
   }
   .speed-caption { font-size: 13.5px; color: var(--ink-2); margin-top: 14px; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 10px 14px; line-height: 1.75; font-family: var(--serif); }
   .speed-caption b { font-family: var(--mono); font-size: .92em; font-weight: 600; color: var(--accent); }
@@ -235,7 +234,10 @@
     header.paper { padding-top: 40px; }
     .fig-card { padding: 16px 14px 14px; }
     .duo { grid-template-columns: 1fr; }
-    .bar-row { grid-template-columns: 1fr; gap: 4px; }
+    .bar-row { grid-template-columns: minmax(0, 1fr) 88px; gap: 4px 8px; }
+    .bar-name { grid-column: 1 / -1; }
+    .bar-track { grid-column: 1; }
+    .bar-val { grid-column: 2; }
     .bar-track { height: 20px; }
   }
 </style>
@@ -891,6 +893,9 @@ L ≤ 11.81M tokens</code></pre>
         <code>B_KEEP → B_REUSE</code>、descriptor、swizzle 与 TMEM movement 必须一起实测。</li>
       <li><strong>Rubin fused kernel 尚未实现。</strong>Softmax、同步、page-table traversal、launch overhead
         与 scheduling 都可能把瓶颈移出孤立的 QK/PV roofline。</li>
+      <li><strong>QAT 是很有价值的 future exploration。</strong>Quantization-aware training 可以让模型直接适应
+        精确的 3-bit indices、E4M3 LUT centroids、可选 UE8M0 B scales、clipping 与 absorbed projections，
+        而不是在冻结 checkpoint 后再补偿量化误差。本文目前没有 QAT result。</li>
       <li><strong>Hybrid model 会稀释 layer-local gain。</strong>Kimi K3 只有 24 个 Gated-MLA layers，
         另有 69 个 KDA layers，其 states 在本实验中保持原生精度；MLA attention estimate 不是整模型加速。</li>
       <li><strong>10M 是 HBM capacity target，不是已支持或实测的 context。</strong>当前 Kimi K3 checkpoint
@@ -1197,28 +1202,24 @@ function barRow(host, name, tok, max, color, opts) {
   label.textContent = name;
   const track = document.createElement("div");
   track.className = "bar-track";
+  const val = document.createElement("span");
+  val.className = "bar-val";
   if (opts && opts.ghost) {
     track.classList.add("na");
-    const g = document.createElement("span");
-    g.className = "bar-ghost";
-    g.textContent = opts.ghost;
-    track.appendChild(g);
+    val.textContent = opts.ghost;
+    val.style.color = "#97927f";
   } else {
     const pct = Math.max(1.2, tok / max * 100);
     const fill = document.createElement("div");
     fill.className = "bar-fill";
     fill.style.width = pct + "%";
     fill.style.background = "linear-gradient(90deg," + color + "d9," + color + ")";
-    const val = document.createElement("span");
-    val.className = "bar-val";
     val.textContent = (opts && opts.valText) || fmtTok(tok) + " tok/s";
-    if (pct > 52) { val.style.right = (100 - pct) + "%"; val.style.marginRight = "10px"; val.style.color = "#faf8f0"; }
-    else { val.style.left = pct + "%"; val.style.marginLeft = "10px"; val.style.color = "#3d3a30"; }
     track.appendChild(fill);
-    track.appendChild(val);
   }
   row.appendChild(label);
   row.appendChild(track);
+  row.appendChild(val);
   host.appendChild(row);
 }
 
