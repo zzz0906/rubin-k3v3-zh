@@ -519,7 +519,9 @@ effective         = 3.125 bit/value</code></pre>
       Linear layer 存储 <code>W[N,K]</code>，计算 <code>Y=A×Wᵀ</code>；物理 B operand 天然就是
       <code>Wᵀ[K,N]</code>。它是 static、可 offline transpose/fit/pack 的，正好位于 Rubin 提供 LUT
       decompression 的位置。Qwen3-4B 与 Gemma4-12B 量化所有 text linear weights；MiniMax-M3 只量化
-      routed-expert weights，其余模块保持 native。
+      routed-expert 的 <code>w13</code>（fused gate/up）与 <code>w2</code>（down）weights。“Expert-input A8”
+      指 dispatched hidden 在进入 <code>w13</code> 前做 QDQ；gate/up 后进入 <code>w2</code> 的 intermediate
+      仍是 BF16。Router、shared experts、attention、norms、embeddings 与 <code>lm_head</code> 保持 native。
     </p>
 
     <h3>3.1 Accuracy</h3>
@@ -546,7 +548,8 @@ effective         = 3.125 bit/value</code></pre>
         <tr><td>K64 block-diagonal LUT-GPTQ [4]</td><td class="num">12.471 / 0.38442</td><td class="num">7.822 / 0.50819</td><td class="num">5.327 / 0.24296</td></tr>
         <tr><td>UE8M0-scale search + Lloyd-Max (ours) [1,2]</td><td class="num">12.845 / 0.43388</td><td class="num">193.054 / 3.54611</td><td class="num">7.835 / 0.65367</td></tr>
         <tr><td>Folded AWQ + Lloyd-Max [1,2,5]</td><td class="num">12.666 / 0.45302</td><td class="num">10.719 / 0.83232</td><td class="num">5.404 / 0.29059</td></tr>
-        <tr><td>Lloyd-Max W3A8 [1,2] (MiniMax: routed gate-A8)</td><td class="num">12.703 / 0.48603</td><td class="num">180.144 / 3.67195</td><td class="num">7.456 / 0.59566</td></tr>
+        <tr><td>Lloyd-Max W3A8 [1,2] (MiniMax: routed-expert w13/w2 W3 only; A remains BF16)</td><td class="num">12.703 / 0.48603</td><td class="num">180.144 / 3.67195</td><td class="num">7.488 / 0.58320</td></tr>
+        <tr><td>MiniMax routed-expert w13/w2 Lloyd-Max W3 + dispatched expert-input A8</td><td class="num">N/A</td><td class="num">N/A</td><td class="num">7.456 / 0.59566</td></tr>
         <tr><td>Dense-only SqueezeLLM [6]</td><td class="num">13.332 / 0.49994</td><td class="num">11.180 / 1.02137</td><td class="num">6.513 / 0.43720</td></tr>
         <tr><td>Zero-aware NF3 (normal-float adaptation) [8]</td><td class="num">29.646 / 1.26669</td><td class="num">4358.944 / 6.57245</td><td class="num">2032820.392 / 13.30284</td></tr>
         <tr><td>Uniform scalar quantization [9]</td><td class="num">162.126 / 2.89007</td><td class="num">19733.351 / 7.98959</td><td class="num">535932.314 / 12.15861</td></tr>
@@ -622,7 +625,7 @@ two K32    = reference + 16 K32-SFB factors       = 216 B = 3.375 bit/W</code></
       activation error：
     </p>
     <div class="table-wrap"><table class="data">
-      <thead><tr><th>Context</th><th class="num">Qwen BF16/A8 PPL</th><th class="num">Qwen KL₅₀</th><th class="num">Gemma BF16/A8 PPL</th><th class="num">Gemma KL₅₀</th><th class="num">MiniMax native/gate-A8 PPL</th><th class="num">MiniMax KL₅₀</th></tr></thead>
+      <thead><tr><th>Context</th><th class="num">Qwen BF16/A8 PPL</th><th class="num">Qwen KL₅₀</th><th class="num">Gemma BF16/A8 PPL</th><th class="num">Gemma KL₅₀</th><th class="num">MiniMax native/routed-expert-input-A8 PPL</th><th class="num">MiniMax KL₅₀</th></tr></thead>
       <tbody>
         <tr><td>8K</td><td class="num">9.447 / 9.508</td><td class="num">0.00559</td><td class="num">6.479 / 6.527</td><td class="num">0.03256</td><td class="num">5.105 / 5.109</td><td class="num">0.05375</td></tr>
         <tr><td>64K</td><td class="num">8.702 / 8.766</td><td class="num">0.00547</td><td class="num">5.828 / 5.844</td><td class="num">0.00689</td><td class="num">4.306 / 4.293</td><td class="num">0.03330</td></tr>
@@ -1148,8 +1151,8 @@ const W_METHODS = {
   gptq:    { label: "K64 GPTQ", color: "#5b4b91", bits: 3.375, kernel: "K64 Hessian/error compensation offline; standard LUT-B GEMM at runtime." },
   scale:   { label: "Scale+LM", color: "#b07c2b", bits: 3.375, kernel: "Offline UE8M0 scale search; physical B-scale descriptor is unchanged." },
   awq:     { label: "Folded AWQ", color: "#a04f2d", bits: 3.375, kernel: "Dense scales fold into RMSNorm/consumers; MiniMax uses an explicit routed gate-input scale." },
-  lm:      { label: "Lloyd-Max", color: "#8a6a14", bits: 3.375, kernel: "Tile-local offline Lloyd-Max; the MiniMax 128K combined row additionally uses routed gate-input A8." },
-  lm_a8:   { label: "LM+gate-A8", color: "#7c6b45", bits: 3.375, kernel: "MiniMax routed W3 plus gate-input A8; down intermediate stays BF16." },
+  lm:      { label: "Lloyd-Max", color: "#8a6a14", bits: 3.375, kernel: "Dense models: all text linear W3. MiniMax: only routed-expert w13/w2 weights W3; expert activations stay BF16." },
+  lm_a8:   { label: "Expert-W3 + input-A8", color: "#7c6b45", bits: 3.375, kernel: "MiniMax only: routed-expert w13/w2 weights W3; dispatched hidden is A8 before w13; intermediate entering w2 remains BF16; router/shared experts/attention stay native." },
   squeeze: { label: "SqueezeLLM", color: "#5d7f79", bits: 3.375, kernel: "Empirical-Fisher fitting offline; MiniMax uses a factorized-Fisher proxy." },
   nf3:     { label: "NF3", color: "#b55f5f", bits: 3.375, kernel: "Static zero-aware NF3 LUT; same storage, poor measured quality." },
   uniform: { label: "Uniform", color: "#a33d2f", bits: 3.375, kernel: "Uniform tile LUT; same storage, catastrophic measured quality." },
@@ -1168,7 +1171,7 @@ const W_DATA = {
   minimax: { label: "MiniMax-M3 routed", values: {
     8192:   { bf16:[5.105,0], a8:[5.109,.05375], h64:[6.209,.27195], awq:[6.203,.32739], gptq:[6.555,.40402], squeeze:[7.642,.56452], rms:[7.591,.58726], lm:[8.611,.67041], lm_a8:[8.637,.69952], scale:[9.206,.74972], uniform:[617957.852,12.18981], nf3:[2104450.529,13.37978] },
     65536:  { bf16:[4.306,0], a8:[4.293,.03330], h64:[5.299,.31414], gptq:[5.593,.37435], awq:[5.555,.41773], rms:[6.651,.54967], squeeze:[6.702,.55930], lm:[7.613,.66020], lm_a8:[7.618,.66528], scale:[8.028,.68932], uniform:[536027.492,12.22787], nf3:[2036118.895,13.51801] },
-    131072: { bf16:[4.124,0], a8:[4.115,.01756], h64:[5.076,.20916], gptq:[5.327,.24296], awq:[5.404,.29059], rms:[6.474,.42795], squeeze:[6.513,.43720], lm:[7.456,.59566], scale:[7.835,.65367], uniform:[535932.314,12.15861], nf3:[2032820.392,13.30284] },
+    131072: { bf16:[4.124,0], a8:[4.115,.01756], h64:[5.076,.20916], gptq:[5.327,.24296], awq:[5.404,.29059], rms:[6.474,.42795], squeeze:[6.513,.43720], lm:[7.488,.58320], lm_a8:[7.456,.59566], scale:[7.835,.65367], uniform:[535932.314,12.15861], nf3:[2032820.392,13.30284] },
   }},
 };
 const wState = { model: "qwen", ctx: 131072, method: "h64", view: "focus" };
