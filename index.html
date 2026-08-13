@@ -282,11 +282,11 @@
   <section class="fig-card" id="weight-explorer" aria-label="Weight 精度与存储交互对比">
     <div class="fig-head">
       <span class="fig-tag">图 1 · Interactive Weight</span>
-      <span class="fig-title">W3 algorithm oracle：固定 legacy scale layout 比较算法</span>
+      <span class="fig-title">W3 two-K32 schedule：固定 scale layout 比较算法</span>
     </div>
     <p class="fig-sub">
       选择 model、context 与 method。左侧是实测 WikiText-2 PPL/KL₅₀，右侧是 payload 与 byte roofline。
-      这组历史 algorithm sweep 固定使用原 K32-SFB oracle；下文另行测量 CUDA 13.4 的 3.125-bit reference
+      这组 algorithm sweep 固定使用自洽的 two-K32 SFA/SFB schedule；下文另行测量 CUDA 13.4 的 3.125-bit
       与 3.25-bit native-SFB contract。
     </p>
     <div class="controls">
@@ -307,7 +307,7 @@
       </div>
       <div class="panel">
         <div class="panel-head">
-          <div class="stat-k">Legacy K32-SFB weight-read ceiling</div>
+          <div class="stat-k">Two-K32 SFA/SFB weight-read ceiling</div>
           <div class="stat-v" id="wxBits">–</div>
           <div class="stat-s" id="wxRatio">–</div>
         </div>
@@ -318,8 +318,8 @@
     <div class="fig-note">
       <b>Contract correction。</b>Linear weight 是 W[N,K]，B=Wᵀ[K,N]。CUDA reference tile 是 512 indices +
       一个 E4M3 LUT，即 3.125 bits/weight。可选 native block scaling 每个 N row 增加一个 UE8M0 SFB
-      （8 bytes/tile），得到 3.25 bits/weight。上面的 3.375-bit 数字来自旧 16-factor K32-SFB oracle，
-      不能称为 exact PTX scale-B layout。详见 <a href="#scale-audit">§3.1</a>。
+      （8 bytes/tile），得到 3.25 bits/weight。上面的 3.375-bit 数字来自两个 K32 MMAs 与 16 个 factors；
+      它是可实现的 two-instruction schedule，不是单条 K64 instruction。详见 <a href="#scale-audit">§3.1</a>。
     </div>
   </section>
 
@@ -382,7 +382,8 @@
     <div class="fig-note">
       <b>协议。</b>KL₅₀：相对 BF16 teacher 的 top-50 bucketed forward KL（nats/token），是 full-vocabulary KL
       的 data-processing 下界；PPL：WikiText-2 test，16 × 8192-token blocks。Lloyd-Max 与 OSCAR+LM 两行使用
-      Rubin 硬件 Q/P 契约（E4M3 + UE8M0 block32）；
+      Rubin 硬件 Q/P 契约（E4M3 + UE8M0 block32）；Lloyd-Max 已使用 corrected denominator ordering，
+      OSCAR+LM corrected rerun 仍 pending；
       uniform 与 OSCAR INT2 两行以 BF16 Q/P 测得。Kimi K3 只量化 24 个 Gated-MLA 层的 512-d MLA latent；
       Kimi PPL 沿用 native 的 last-2048-NLL protocol，不可跨模型比较。<b>速度。</b>针对 Qwen3-4B decode（36 层 · 32 Q / 8 KV heads ·
       head dim 128）的 attention-only 解析 roofline：K3V3 每值存 3.125 bit 外加 BF16 窗口（8K 下约 3.63 b/val），
@@ -401,9 +402,9 @@
       <h2>TL;DR</h2>
       <ol>
         <li><strong>Weight 是最自然的 LUT-B target，但 scale contract 必须分清。</strong>CUDA 13.4 reference
-          LUT 是 3.125 bits/weight，可选 native SFB 是 3.25 bits/weight。原 3.375-bit K32-SFB sweep 是
-          algorithm oracle，不是 exact PTX scale layout。Folded tensor-global scale 帮助 Qwen、却恶化 Gemma；
-          native SFB 是更一致的 hardware-exact 选择。</li>
+          LUT-only B payload 是 3.125 bits/weight，single-K64 native SFB 是 3.25 bits/weight。原 3.375-bit
+          sweep 是自洽的 two-K32 schedule。Folded global scale 会改善两个模型的 LUT-only K64 path；加入
+          native SFB 后，它帮助 Qwen、却恶化 Gemma。</li>
         <li><strong>A3 不是第二个免费的 low-bit operand。</strong>公开 PTX 只有 LUT-B。W3 已占用 B，因此
           native A3 会迫使 W 回到 FP8，变成 W8A3。本文保留 E4M3 + UE8M0 K32 的 A8，不虚构 A3 speed。</li>
         <li><strong>KV 能用同一条指令，但 layout 更难。</strong>QK group 是 8 tokens × 64 head channels；
@@ -455,7 +456,7 @@
     <p>我们实际安装了 CUDA 13.4.46 Developer Preview，并使用：</p>
     <ul>
       <li>PTX ISA 9.4</li>
-      <li><code>sm_107a</code></li>
+      <li><code>sm_107f</code> family target for documented LUT-B/K64 forms</li>
       <li><code>ptxas</code></li>
       <li><code>cuobjdump</code></li>
       <li><code>nvdisasm</code></li>
@@ -493,7 +494,7 @@ effective         = 3.125 bit/value</code></pre>
     <div class="table-wrap"><table class="data">
       <thead><tr><th>Probe</th><th>Compatibility</th><th>Compiler / SASS Evidence</th><th>Meaning</th></tr></thead>
       <tbody>
-        <tr><td><code>sm_107a</code> target</td><td><span class="ok">SUPPORTED</span></td><td><code>ptxas</code> PASS</td><td>Rubin compile CI can be established</td></tr>
+        <tr><td><code>sm_107f</code> family target</td><td><span class="faint">REQUIRED</span></td><td>Compile probe updated; rerun pending</td><td>Prior <code>sm_107a</code> syntax pass did not validate documented K64 form</td></tr>
         <tr><td>UE5M3 conversion</td><td><span class="ok">SUPPORTED</span></td><td><code>F2FP.SATFINITE.UE5M3</code></td><td>The UE5M3 datatype itself exists</td></tr>
         <tr><td>Dense E4M3 A × LUT-B E4M3 B</td><td><span class="ok">SUPPORTED</span></td><td><code>UTCQMMA.LUTB</code></td><td>The basic QK/PV mapping is legal</td></tr>
         <tr><td>MXFP8 block32 A × LUT-B B</td><td><span class="ok">SUPPORTED</span></td><td><code>UTCQMMA.LUTB</code> + scale TMEM</td><td>Scaled Q/P can be fused</td></tr>
@@ -523,8 +524,8 @@ effective         = 3.125 bit/value</code></pre>
 
     <h3>3.1 Accuracy</h3>
     <p>
-      下表 algorithm sweep 固定使用同一个 legacy 3.375-bit K32-SFB oracle，不带 sparse residual，也没有隐藏
-      的高精度 outlier path；它可以比较算法，但不是 exact PTX scale-B layout。128K protocol 是一个
+      下表 algorithm sweep 固定使用同一个自洽 3.375-bit two-K32 SFA/SFB schedule，不带 sparse residual，
+      也没有隐藏的高精度 outlier path。128K protocol 是一个
       131072-token block、131071 scored tokens 和 256 个 KL₅₀ samples。这里是
       GPTQ<span class="cite"><a href="#ref-gptq">[4]</a></span>、AWQ<span class="cite"><a href="#ref-awq">[5]</a></span>、
       SqueezeLLM<span class="cite"><a href="#ref-squeezellm">[6]</a></span>、QuaRot 使用的 randomized Hadamard
@@ -535,7 +536,7 @@ effective         = 3.125 bit/value</code></pre>
       scalar-quantization baseline<span class="cite"><a href="#ref-quant">[9]</a></span>。
     </p>
     <div class="table-wrap"><table class="data">
-      <caption>Legacy K32-SFB algorithm oracle; not the exact CUDA 13.4 scale-B layout</caption>
+      <caption>Algorithm comparison under one self-consistent two-K32 SFA/SFB schedule</caption>
       <thead><tr><th>128K method</th><th class="num">Qwen PPL / KL₅₀</th><th class="num">Gemma PPL / KL₅₀</th><th class="num">MiniMax routed PPL / KL₅₀</th></tr></thead>
       <tbody>
         <tr><td>BF16 W + BF16 A</td><td class="num"><strong>8.482 / 0.00000</strong></td><td class="num"><strong>5.771 / 0.00000</strong></td><td class="num"><strong>4.124 / 0.00000</strong></td></tr>
@@ -559,23 +560,23 @@ effective         = 3.125 bit/value</code></pre>
 
     <h4 id="scale-audit">3.1.1 CUDA 13.4 Scale-contract Audit</h4>
     <p>
-      使用同一个 H64 + K64 LUT-GPTQ method、相同 16×8192 blocks 与 256 KL₅₀ samples，只改变 LUT-B
-      scale metadata。PTX 没有 standalone global numeric-scale operand；下表 global 是每个 tensor 一个
-      FP32 scale，必须 fold 到 projection 或 output epilogue。
+      使用同一个 H64 + K64 LUT-GPTQ method、相同 16×8192 blocks 与 256 KL₅₀ samples。前四行使用一条
+      K64 MMA 与 K64 SFA/SFB；最后一行使用两条 K32 MMA 与 K32 SFA/SFB。PTX 没有 standalone global
+      numeric-scale operand；global 是每个 tensor 一个 FP32 scale，必须 fold 到 projection/epilogue。
     </p>
     <div class="table-wrap"><table class="data">
       <thead><tr><th>LUT-B B contract</th><th class="num">Bits/W</th><th class="num">Qwen PPL / KL₅₀</th><th class="num">Gemma PPL / KL₅₀</th><th>Kernel implication</th></tr></thead>
       <tbody>
-        <tr><td>Reference LUT only</td><td class="num"><strong>3.125</strong></td><td class="num">12.171 / 0.31051</td><td class="num">8.087 / 0.41466</td><td>No SFB</td></tr>
-        <tr><td>Reference LUT + tensor-global scale</td><td class="num"><strong>3.125*</strong></td><td class="num">12.001 / 0.29054</td><td class="num">8.028 / 0.43362</td><td>Folded/epilogue FP32 scale</td></tr>
-        <tr><td>Native optional SFB (`scale_B=1×N`)</td><td class="num"><strong>3.250</strong></td><td class="num"><strong>11.601 / 0.25205</strong></td><td class="num"><strong>7.991 / 0.32454</strong></td><td>8 UE8M0 factors/tile</td></tr>
-        <tr><td>Native SFB + tensor-global scale</td><td class="num"><strong>3.250*</strong></td><td class="num">11.663 / <strong>0.24696</strong></td><td class="num">8.005 / 0.38117</td><td>SFB plus folded/epilogue scale</td></tr>
-        <tr><td>Legacy K32-SFB oracle</td><td class="num">3.375</td><td class="num">11.504 / 0.24232</td><td class="num">7.924 / 0.34988</td><td>16 factors/tile; not exact PTX shape</td></tr>
+        <tr><td>K64 MXFP8 A + LUT only</td><td class="num"><strong>3.125</strong></td><td class="num">12.168 / 0.30774</td><td class="num">8.041 / 0.43087</td><td>SFB=1 synthesized; no stored SFB</td></tr>
+        <tr><td>K64 LUT + tensor-global scale</td><td class="num"><strong>3.125*</strong></td><td class="num">11.998 / 0.29491</td><td class="num">8.038 / 0.39899</td><td>Folded/epilogue FP32 scale</td></tr>
+        <tr><td>K64 native optional SFB (`scale_B=1×N`)</td><td class="num"><strong>3.250</strong></td><td class="num"><strong>11.596 / 0.25595</strong></td><td class="num"><strong>7.974 / 0.32932</strong></td><td>K64 SFA + 8 SFB factors/tile</td></tr>
+        <tr><td>K64 native SFB + tensor-global scale</td><td class="num"><strong>3.250*</strong></td><td class="num">11.664 / <strong>0.24494</strong></td><td class="num">8.021 / 0.37371</td><td>K64 SFA/SFB + folded scale</td></tr>
+        <tr><td>Two-K32 SFA/SFB schedule</td><td class="num">3.375</td><td class="num">11.504 / 0.24232</td><td class="num">7.924 / 0.34988</td><td>16 factors and two K32 MMAs</td></tr>
       </tbody>
     </table></div>
     <p class="faint">
-      *每个 tensor 一个 4-byte FP32 scale，未计入 per-weight bits。Global scale 不是通用修复：Qwen 改善，
-      Gemma KL 反而恶化；native SFB 是两个模型都更一致的 hardware-exact 结果。
+      *每个 tensor 一个 4-byte FP32 scale，未计入 per-weight bits。Global scale 改善两个模型的 K64
+      LUT-only path；加入 native SFB 后，它改善 Qwen、却恶化 Gemma。
     </p>
 
     <h3>3.2 Kernel Organization</h3>
@@ -584,7 +585,7 @@ one B tile = W[n:n+8, k:k+64]
 reference  = 192 B indices + 8 B LUT             = 200 B = 3.125 bit/W
 native SFB = reference + 8 × UE8M0 (scale_B=1×N) = 208 B = 3.250 bit/W
 global     = one FP32 scale/tensor, folded outside the LUT-B instruction
-legacy     = reference + 16 K32-SFB factors       = 216 B = 3.375 bit/W</code></pre>
+two K32    = reference + 16 K32-SFB factors       = 216 B = 3.375 bit/W</code></pre>
     <div class="table-wrap"><table class="data">
       <thead><tr><th>Method family</th><th>Offline work</th><th>Runtime change beyond MXFP8-A × LUT-B-B</th></tr></thead>
       <tbody>
@@ -601,7 +602,7 @@ legacy     = reference + 16 K32-SFB factors       = 216 B = 3.375 bit/W</code></
       <tbody>
         <tr><td>Reference LUT only</td><td class="num">3.125</td><td class="num"><strong>33.6×</strong></td><td class="num"><strong>14.1×</strong></td><td class="num">5.12×</td></tr>
         <tr><td>Native optional SFB</td><td class="num">3.250</td><td class="num"><strong>32.3×</strong></td><td class="num"><strong>13.5×</strong></td><td class="num">4.92×</td></tr>
-        <tr><td>Legacy K32-SFB oracle</td><td class="num">3.375</td><td class="num">31.1×</td><td class="num">13.0×</td><td class="num">4.74×</td></tr>
+        <tr><td>Two-K32 SFA/SFB schedule</td><td class="num">3.375</td><td class="num">31.1×</td><td class="num">13.0×</td><td class="num">4.74×</td></tr>
       </tbody>
     </table></div>
     <div class="callout">
@@ -806,17 +807,18 @@ legacy     = reference + 16 K32-SFB factors       = 216 B = 3.375 bit/W</code></
         <tr><td>BF16</td><td class="num">all</td><td class="num">all</td><td class="num"><strong>9.468</strong></td><td class="num"><strong>0.0000</strong></td></tr>
         <tr><td>OSCAR INT2, no LM</td><td class="num">64</td><td class="num">256</td><td class="num">9.893</td><td class="num">0.10791</td></tr>
         <tr><td>Offline LM K3V3, no OSCAR; Q/P conversion pending</td><td class="num">64</td><td class="num">256</td><td class="num"><strong>10.406</strong></td><td class="num">0.09618</td></tr>
-        <tr><td>Offline LM K3V3, no OSCAR + FP8/UE8M0 Q/P</td><td class="num">64</td><td class="num">256</td><td class="num">10.434</td><td class="num">0.10447</td></tr>
-        <tr><td>OSCAR + offline LM K3V3 + FP8/UE8M0 P only</td><td class="num">64</td><td class="num">256</td><td class="num">10.446</td><td class="num">0.09609</td></tr>
+        <tr><td>Offline LM K3V3, no OSCAR + corrected FP8/UE8M0 Q/P</td><td class="num">64</td><td class="num">256</td><td class="num"><strong>10.407</strong></td><td class="num">0.09665</td></tr>
+        <tr><td>OSCAR + offline LM K3V3 + FP8/UE8M0 P only (legacy denominator ordering)</td><td class="num">64</td><td class="num">256</td><td class="num">10.446</td><td class="num">0.09609</td></tr>
         <tr><td>OSCAR + offline LM K3V3; Q/P conversion pending</td><td class="num">64</td><td class="num">256</td><td class="num">10.453</td><td class="num"><strong>0.09482</strong></td></tr>
-        <tr><td>OSCAR + offline LM K3V3 + FP8/UE8M0 Q/P</td><td class="num">64</td><td class="num">256</td><td class="num">10.465</td><td class="num">0.10090</td></tr>
+        <tr><td>OSCAR + offline LM K3V3 + FP8/UE8M0 Q/P (legacy denominator ordering; rerun pending)</td><td class="num">64</td><td class="num">256</td><td class="num">10.465</td><td class="num">0.10090</td></tr>
         <tr><td>OSCAR + offline LM K3V3 + FP8/UE8M0 Q only</td><td class="num">64</td><td class="num">256</td><td class="num">10.466</td><td class="num">0.09935</td></tr>
         <tr><td>Ordinary uniform K3V3</td><td class="num">64</td><td class="num">256</td><td class="num">1504.444</td><td class="num">5.14717</td></tr>
       </tbody>
     </table></div>
     <p>
-      8K 下 ordinary offline LM 的 3-bit PPL 最低（10.406），OSCAR + offline LM 的 KL₅₀ 最低（0.09482）。
-      完整 Rubin Q/P contract 下，ordinary LM 是 10.434/0.10447，OSCAR+LM 是 10.465/0.10090。
+      Corrected P-QDQ 在 prefix/current 两个 stage 都先用未量化 P 计算 FP32 softmax denominator，再只为 PV
+      量化 P。No-OSCAR 从 10.434/0.10447 修正为 <strong>10.407/0.09665</strong>，几乎等于 no-P-QDQ
+      的 10.406/0.09618；此前差距主要是 runtime ordering artifact。OSCAR corrected rerun 仍 pending。
     </p>
 
     <h4>5.2.4 Cross-model Measurement</h4>
@@ -1186,10 +1188,10 @@ const MODELS = {
         desc: "Full-precision baseline \u2014 no KV quantization." },
       { key: "uniform",  label: "Uniform \u00b7 3-bit",    color: "#a33d2f", bits: 3,  ppl: 1504.444, kl: 5.14717, qp: "BF16 Q/P",          kind: "k3v3",
         desc: "Eight evenly spaced levels, no rotation, no fitted codebook \u2014 \u201cjust store INT3\u201d. It collapses." },
-      { key: "lm",       label: "Lloyd-Max \u00b7 3-bit",  color: "#31607f", bits: 3,  ppl: 10.434,   kl: 0.10447, qp: "FP8/UE8M0 Q/P",     kind: "k3v3", hw: true,
-        desc: "Offline per-layer 8-entry E4M3 codebooks \u2014 the eight levels move to where the values actually are." },
+      { key: "lm",       label: "Lloyd-Max \u00b7 3-bit",  color: "#31607f", bits: 3,  ppl: 10.407,   kl: 0.09665, qp: "FP8/UE8M0 Q/P",     kind: "k3v3", hw: true,
+        desc: "Corrected P-QDQ: FP32 denominator first, then quantize P only for PV. The old 10.434/0.10447 gap was largely ordering error." },
       { key: "oscar_lm", label: "OSCAR+LM \u00b7 3-bit",   color: "#8a6a14", bits: 3,  ppl: 10.465,   kl: 0.10090, qp: "FP8/UE8M0 Q/P",     kind: "k3v3", hw: true,
-        desc: "OSCAR rotation + outlier clipping in front of Lloyd-Max codebooks. Lowest KL\u2085\u2080 divergence from the BF16 teacher." },
+        desc: "Legacy prefix-denominator ordering; corrected OSCAR P-QDQ rerun is still pending." },
       { key: "int2",     label: "OSCAR \u00b7 2-bit",      color: "#3e6b5f", bits: 2,  ppl: 9.893,    kl: 0.10791, qp: "BF16 Q/P",          kind: "ref",
         desc: "OSCAR INT2 reference recipe (no Lloyd-Max). Rubin's LUT-B index is 3-bit, so this row is accuracy-only." },
     ],
@@ -1229,7 +1231,7 @@ function speedAt(ctx) {
   return { fl, bB, bK, h100, rubinBF16, byte, halfRate, denseRate };
 }
 
-const hx = { model: "qwen", preset: "oscar_lm", ctx: 1048576, layout: "single", klView: "focus" };
+const hx = { model: "qwen", preset: "lm", ctx: 1048576, layout: "single", klView: "focus" };
 const curModel = () => MODELS[hx.model];
 const curPreset = () => {
   const M = curModel();
