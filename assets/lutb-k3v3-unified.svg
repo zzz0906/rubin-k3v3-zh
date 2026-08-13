@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900" role="img" aria-labelledby="title desc">
   <title id="title">K3V3 on Rubin LUT-B: token-axis cache layout, the two lookup MMAs, and the GQA/MLA variants</title>
-  <desc id="desc">Top band: the cache along the token axis with a BF16 sink and recent window around a 3-bit LUT-B body, packed once on exit and read as operand B by two UTCQMMA.LUTB multiplies with FP32 softmax between them; dashed rings mark where in-core lookup runs. Bottom panels: GQA compresses separate K-transpose and V caches with two codebooks; MLA compresses one shared 512-d latent feeding both multiplies.</desc>
+  <desc id="desc">Top band: the cache along the token axis with a BF16 sink and recent window around a 3-bit LUT-B body. Bottom panels: GQA uses separate K-transpose and V caches with exact 8-token by 64-channel and 64-token by 8-channel tiles; MLA quantizes one logical 512-d latent but needs runtime retiling or two direct physical layouts for the opposite QK and PV orientations.</desc>
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0" stop-color="#fbf9f1"/>
@@ -115,9 +115,9 @@
   <path d="M485 509 H525" class="purple-line"/>
   <rect x="526" y="450" width="228" height="118" rx="14" class="vbox"/>
   <text x="640" y="480" class="vlabel" text-anchor="middle">two LUT-B caches</text>
-  <text x="640" y="506" class="vsmall" text-anchor="middle">INT3 K^T &#8594; B of MMA 1</text>
-  <text x="640" y="529" class="vsmall" text-anchor="middle">INT3 V &#8594; B of MMA 2</text>
-  <text x="640" y="553" class="tiny" text-anchor="middle">K stored physically transposed</text>
+  <text x="640" y="502" class="vsmall" text-anchor="middle">K tile: 8 tokens &#215; 64 channels</text>
+  <text x="640" y="526" class="vsmall" text-anchor="middle">V tile: 64 tokens &#215; 8 channels</text>
+  <text x="640" y="552" class="tiny" text-anchor="middle">separate direct layouts &#183; 512 values/tile</text>
 
   <path d="M560 568 V584 H312 V609" class="purple-line"/>
   <path d="M700 568 V609" class="purple-line"/>
@@ -147,7 +147,7 @@
 
   <!-- ======================= MLA panel ======================= -->
   <rect x="820" y="356" width="736" height="454" rx="22" fill="#fffdf6" stroke="#cfc8b2" stroke-width="1.5" filter="url(#shadow)"/>
-  <text x="848" y="394" class="panel-title">MLA &#8212; one shared latent, one codebook</text>
+  <text x="848" y="394" class="panel-title">MLA &#8212; one logical latent, opposite physical orientations</text>
   <text x="848" y="420" class="small">Kimi K3 &#183; 24 Gated-MLA layers &#183; rotation absorbed into projections</text>
 
   <circle cx="864" cy="476" r="17" fill="#857c66"/>
@@ -161,9 +161,9 @@
   <text x="1191" y="498" class="small" text-anchor="middle">one codebook + one R_latent</text>
   <path d="M1289 480 H1329" class="purple-line"/>
   <rect x="1330" y="444" width="200" height="72" rx="11" class="vbox"/>
-  <text x="1430" y="470" class="vlabel" text-anchor="middle">one INT3 latent</text>
-  <text x="1430" y="492" class="vsmall" text-anchor="middle">B of MMA 1 as c_KV^T</text>
-  <text x="1430" y="510" class="vsmall" text-anchor="middle">B of MMA 2 as c_KV</text>
+  <text x="1430" y="468" class="vlabel" text-anchor="middle">canonical INT3 latent</text>
+  <text x="1430" y="490" class="vsmall" text-anchor="middle">QK: 8 tokens &#215; 64 latent ch</text>
+  <text x="1430" y="510" class="vsmall" text-anchor="middle">PV requires retile or second layout</text>
   <rect x="892" y="530" width="408" height="44" rx="10" class="nbox2" stroke-dasharray="6 4"/>
   <text x="1096" y="548" class="small" text-anchor="middle">Native bypass (not quantized)</text>
   <text x="1096" y="566" class="tiny" text-anchor="middle">69 KDA states: separate path &#183; 64-d RoPE suffix &#8594; score term</text>
@@ -195,7 +195,7 @@
 
   <rect x="892" y="716" width="638" height="66" rx="13" class="nbox2"/>
   <text x="1211" y="743" class="label" text-anchor="middle">Value up-projection &#8594; attention output</text>
-  <text x="1211" y="766" class="small" text-anchor="middle">One cache and one codebook per layer &#183; expanded K/V never materialized</text>
+  <text x="1211" y="766" class="small" text-anchor="middle">One copy + runtime retile, or two direct layouts &#183; expanded K/V never materialized</text>
 
   <!-- ======================= footer legend ======================= -->
   <rect x="130" y="834" width="1340" height="40" rx="11" fill="#fffdf6" stroke="#cfc8b2"/>
