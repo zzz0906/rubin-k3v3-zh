@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Vera Rubin LUT-B：3-bit Weight、Activation 与 KV 的 Accuracy-First 实验</title>
-<meta name="description" content="准确讨论 Vera Rubin LUT-B 的 W3A8 weight、不可行的 A3 路径与 K3V3 cache，包括 K64xN8 分组、实测精度、kernel 约束和 10M MLA capacity 条件。">
+<meta name="description" content="准确讨论 Vera Rubin LUT-B 的 W3A8 weight、当前不受支持的 A3 路径与 K3V3 cache，包括 K64xN8 分组、实测精度、kernel bound 与 request-level HBM capacity arithmetic。">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;0,6..72,700;1,6..72,400;1,6..72,500&family=Noto+Sans+SC:wght@400;500;600;700&family=Noto+Serif+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -270,9 +270,9 @@
     <a href="#sec2">2&ensp;Hardware contract</a>
     <a href="#weight">3&ensp;Weight W3A8</a>
     <a href="#activation">4&ensp;Activation</a>
-    <a href="#kv">5&ensp;KV · Path to 10M</a>
+    <a href="#kv">5&ensp;KV Cache</a>
     <a href="#limitations">6&ensp;Limitations</a>
-    <a href="#sec5">7&ensp;结论</a>
+    <a href="#takeaways">7&ensp;结论</a>
     <a href="#repro">Reproducibility</a>
     <a href="#refs">References</a>
   </nav>
@@ -330,7 +330,7 @@
     </div>
     <p class="fig-sub">
       选择模型与 KV 方案。左：相对 BF16/native teacher 的实测 KL₅₀（8K，PPL 一并标注）；右：Qwen3-4B 显示
-      Rubin attention-only sensitivity scenarios；Kimi K3 显示 single-copy 与 dual-layout 的 TP8 MLA capacity。
+      Rubin attention-only sensitivity scenarios；Kimi K3 显示不同并发 request 下的 TP8 HBM context bound。
     </p>
 
     <div class="controls">
@@ -347,7 +347,7 @@
         <div class="seg" id="segCtx"></div>
       </div>
       <div class="ctrl" id="layoutCtrl">
-        <div class="ctrl-label">MLA physical layout（capacity panel）</div>
+        <div class="ctrl-label">MLA physical layout（HBM bound）</div>
         <div class="seg" id="segLayout"></div>
       </div>
       <div class="ctrl" id="klCtrl">
@@ -389,8 +389,8 @@
       且上限已包含 B-only LUT 约束 —— MXFP8 的 M tile 固定为 128，GQA4 single-token decode 只能填 4 行，
       算力上限被压到 273.4 TFLOP/s。不含 weights、MLP、sampling 与调度。完整消融见
       <a href="#sec4">§5.2</a>；含 B200、执行效率区间与 byte-only 上界的完整推导见
-      <a href="#throughput">§5.4</a>。Kimi capacity panel 使用 14.3 GB runtime reserve：single-copy + retile
-      为 10.0M，dual direct layouts 为 6.21M。
+      <a href="#throughput">§5.3</a>。Kimi panel 使用 14.3 GB/GPU runtime reserve，并把固定 HBM pool
+      平均分给并发 requests；这是 allocation arithmetic，不是 supported context claim。
     </div>
   </section>
 
@@ -402,16 +402,17 @@
       <ol>
         <li><strong>Weight 是最自然的 LUT-B target，但 scale contract 必须分清。</strong>CUDA 13.4 reference
           LUT payload 是 3.125 bits/weight；paired SFB+global 在 one-K64 下是 3.25、two-K32 下是 3.375。
-          Two-K32 一致改善 RMS² quality，H64 winner 取决于 model/context。Qwen/Gemma/MiniMax paired-scale
-          cells 现已全部实测。</li>
-        <li><strong>A3 不是第二个免费的 low-bit operand。</strong>公开 PTX 只有 LUT-B。W3 已占用 B，因此
-          native A3 会迫使 W 回到 FP8，变成 W8A3。本文保留 E4M3 + UE8M0 K32 的 A8，不虚构 A3 speed。</li>
+          Two-K32 通常降低 RMS² PPL，但可能恶化 KL₅₀；H64 同样取决于 model/context。Qwen/Gemma/MiniMax
+          paired-scale cells 现已全部实测。</li>
+        <li><strong>当前 LUT-B MMA 不支持 A3 作为 matrix A。</strong>公开 PTX 只有 B operand 的 lookup
+          decompression；W3 已占用该 operand，因此 W3A3 无法编码。本文支持的 pairing 是 E4M3 A +
+          UE8M0 K32 scale 与 3-bit LUT-B operand。</li>
         <li><strong>KV 能用同一条指令，但 layout 更难。</strong>QK group 是 8 tokens × 64 head channels；
           PV group 是 64 tokens × 8 value channels。Offline LM 与可选 OSCAR 把 Qwen K3V3 保持在 PPL
           约 10.4，而 per-tile uniform K3V3 的 PPL 是 1504。</li>
-        <li><strong>10M 有明确 layout 条件。</strong>Kimi 的同一份 <code>c_KV</code> 在 QK/PV 需要相反方向。
-          单份 200-B latent 只有依赖 runtime retiling 才能到约 10M；保存两份可直接消费的 layout 会把
-          latent payload 提到 400 B/token，capacity 降到约 6.2M。</li>
+        <li><strong>Context capacity 是共享 HBM budget，不是模型支持声明。</strong>在本文 TP8 memory
+          assumptions 下，single-request arithmetic 是 runtime retile 的 10.0M，或 two direct layouts
+          的 6.21M；该 pool 会被并发 requests 平分，而且 checkpoint 自身 positional limit 不变。</li>
       </ol>
     </div>
 
@@ -434,16 +435,17 @@
         <tr><td>NVLink bandwidth</td><td class="num">3.6 TB/s</td><td class="num">260 TB/s switch bandwidth</td></tr>
       </tbody>
     </table></div>
-    <h3>1.2 为什么我们特别关心 KV cache？</h3>
+    <h3>1.2 为什么 Weight 和 KV 都值得关心？</h3>
     <p>
       Community 常用一句话概括 inference：<strong>prefill is compute-bound, decode is bandwidth-bound</strong>。
       Medium 的 <a href="https://medium.com/@asheesh.goja/prefill-is-compute-decode-is-bandwidth-the-architectural-case-for-disaggregated-llm-inference-92c8b36d1a88">disaggregated inference 文章</a>用这个框架解释了为什么
-      HBM、KV movement 和 prefill/decode separation 会变得越来越重要。
+      HBM traffic 和 prefill/decode separation 会变得越来越重要。
     </p>
     <p>
-      对长 context decode，每生成一个 token，都需要重新读取历史 K/V。模型越小、context 越长、batch 越高，
-      KV traffic 越可能从配角变成主要瓶颈。因此 Rubin 的 22 TB/s HBM4 很重要；但更有意思的是，它还带来了
-      减少 bytes/value 的新 ISA。
+      Decode 会反复读取两类大数据：每个 linear layer 的 model weights，以及 attention 的历史 K/V。
+      Weight traffic 每个生成 token 大致固定，在 low batch 时尤其重要；KV traffic 则随 context 增长，并在
+      long-context serving 中逐渐占主导。LUT-B 的意义在于，同一个 3-bit B-operand format 可以同时减少
+      static weight 与动态写入 KV cache 的 bytes。
     </p>
 
     <h3>1.3 用 CUDA 13.4 探测 Rubin ISA</h3>
@@ -508,11 +510,24 @@ effective         = 3.125 bit/value</code></pre>
       PTX 9.4 规定 <code>mxf8f6f4</code> 的 block scale 为 UE8M0，而 UE5M3 scale 属于 <code>mxf4nvf4</code>。
       因此 K3V3 attention 的 hardware-valid Q/P contract 是 <strong>E4M3 + UE8M0 block32</strong>。
     </p>
-    <div class="callout">
-      这些 probes 证明的是 compiler acceptance 和 SASS emission，不是 Rubin runtime correctness。
-      CUDA 13.4 Developer Preview 也明确禁止用 preview performance data 表征硬件。
-    </div>
-
+    <h3>2.3 3-bit Weight 是最自然的 LUT-B Case；KV 使用同一个 Primitive</h3>
+    <div class="table-wrap"><table class="data">
+      <thead><tr><th>Target</th><th>MXFP8 A</th><th>3-bit LUT-B</th><th>解决的瓶颈</th><th>仍然困难的部分</th></tr></thead>
+      <tbody>
+        <tr><td>Weight W3A8</td><td>activation <code>X</code></td><td>offline-packed <code>Wᵀ</code></td><td>model-weight capacity 与 decode weight bandwidth</td><td>quantization quality 与 small-batch M occupancy</td></tr>
+        <tr><td>KV K3V3</td><td><code>Q</code>，再到 <code>P</code></td><td>dynamic <code>Kᵀ</code>，再到 <code>V</code></td><td>long-context KV capacity 与重复 HBM read</td><td>runtime packing、paged layout、orientation 与 row packing</td></tr>
+      </tbody>
+    </table></div>
+    <p>
+      Weight 的 mapping 更简单：<code>Y = X × Wᵀ</code> 天然把 static、可离线 transpose 的 weight matrix
+      放在 B，因此每个 64 × 8 granule 都能提前打包成 512 个 indices 和一个 8-value E4M3 LUT。这是
+      <strong>3-bit storage + E4M3 reconstruction</strong>，不是普通 INT3 arithmetic。
+    </p>
+    <p>
+      同一条 instruction 并不限于 static weight。Dynamic <code>Kᵀ</code> 与 <code>V</code> 也能成为 B
+      operand，因此 Rubin 可以用同一个 in-MMA lookup 减少 long-context decode 反复读取的 KV bytes。
+      KV 更难实现，但它与 weight 使用的是同一个硬件 primitive。
+    </p>
     <h2 id="weight"><span class="idx">3</span>Weight Quantization：最自然的 W3A8 LUT-B Case</h2>
     <p>
       Linear layer 存储 <code>W[N,K]</code>，计算 <code>Y=A×Wᵀ</code>；物理 B operand 天然就是
@@ -553,8 +568,9 @@ effective         = 3.125 bit/value</code></pre>
       </tbody>
     </table></div>
     <p>
-      H64 和 RMS² 对 schedule/scale granularity 的响应不同。Two-K32+global 一致改善 RMS² 相对 K64+global；
-      H64 则取决于 model/context。H64 不是免费 offline trick，A 需要对应 runtime transform。
+      H64 和 RMS² 对 schedule/scale granularity 的响应不同。Two-K32+global 同时改善 Qwen/Gemma 的 RMS²
+      PPL/KL，也降低 MiniMax PPL，但 MiniMax KL₅₀ 更偏向 one-K64。H64 同样取决于 model/context，而且
+      不是免费 offline trick：A 需要对应 runtime transform。
     </p>
 
     <h3>3.2 Kernel Organization</h3>
@@ -578,30 +594,29 @@ two K32    = reference + 16 K32-SFB factors       = 216 B = 3.375 bit/W</code></
     <div class="table-wrap"><table class="data">
       <thead><tr><th>Rubin Weight Contract</th><th class="num">Bits/W</th><th class="num">vs H100 BF16</th><th class="num">vs B200 BF16</th><th class="num">vs Rubin BF16</th></tr></thead>
       <tbody>
-        <tr><td>Reference LUT only</td><td class="num">3.125</td><td class="num"><strong>33.6×</strong></td><td class="num"><strong>14.1×</strong></td><td class="num">5.12×</td></tr>
-        <tr><td>Native optional SFB</td><td class="num">3.250</td><td class="num"><strong>32.3×</strong></td><td class="num"><strong>13.5×</strong></td><td class="num">4.92×</td></tr>
-        <tr><td>Two-K32 SFA/SFB schedule</td><td class="num">3.375</td><td class="num">31.1×</td><td class="num">13.0×</td><td class="num">4.74×</td></tr>
+        <tr><td>One K64：native SFB + folded global scale</td><td class="num">3.250</td><td class="num">32.31×</td><td class="num">13.54×</td><td class="num">4.92×</td></tr>
+        <tr><td>Two K32：native SFB + folded global scale</td><td class="num">3.375</td><td class="num">31.10×</td><td class="num">13.04×</td><td class="num">4.74×</td></tr>
       </tbody>
     </table></div>
     <div class="table-wrap"><table class="data">
       <caption>One-K64 versus two-K32 under paired SFB + global scale</caption>
       <thead><tr><th>Schedule</th><th class="num">SFB/tile</th><th class="num">Bits/W</th><th class="num">MMA instructions/K64</th><th>Measured tendency</th></tr></thead>
       <tbody>
-        <tr><td>One K64</td><td class="num">8</td><td class="num">3.25</td><td class="num">1</td><td>Higher byte ceiling; coarser local scaling</td></tr>
-        <tr><td>Two K32</td><td class="num">16</td><td class="num">3.375</td><td class="num">2</td><td>Better RMS² quality; H64 depends on model/context</td></tr>
+        <tr><td>One K64</td><td class="num">8</td><td class="num">3.25</td><td class="num">1</td><td>Higher byte ceiling; MiniMax RMS² has lower KL₅₀</td></tr>
+        <tr><td>Two K32</td><td class="num">16</td><td class="num">3.375</td><td class="num">2</td><td>Finer scaling; Qwen/Gemma RMS² improve, MiniMax trades PPL for KL₅₀</td></tr>
       </tbody>
     </table></div>
-    <div class="callout">
-      <strong>修正后的 byte ceiling：3.125-bit reference 相对 H100/B200 BF16 是 33.6×/14.1×；native SFB
-      是 32.3×/13.5×。</strong>这些都是纯 weight-read roofline，不是 end-to-end speedup。
-    </div>
     <p>
-      这些 ceilings 假设所有 useful bytes 都是 weight traffic、达到 public peak HBM、且 LUT-B MMA 跟得上。
-      A read、output write、small-M occupancy、routing、H64 与 MLP schedule 都会降低收益；只有 Rubin measurement
-      才能把这些 byte ratios 变成 kernel 或 end-to-end number。
+      每个数都直接按
+      <code>(22 TB/s ÷ baseline bandwidth) × (16 bits ÷ stored bits/weight)</code> 计算。例如 one-K64
+      相对 H100 是 <code>(22 ÷ 3.35) × (16 ÷ 3.25) = 32.31×</code>，相对 B200 是
+      <code>(22 ÷ 8) × (16 ÷ 3.25) = 13.54×</code>。这些只是 weight-read bound，假设所有 useful bytes
+      都是 weight traffic、达到 public peak HBM、且 LUT-B MMA 跟得上。A read、output write、small-M
+      occupancy、routing、H64 与 MLP schedule 都会降低收益；只有 Rubin measurement 才能把 byte ratio
+      变成 kernel 或 end-to-end number。
     </p>
 
-    <h2 id="activation"><span class="idx">4</span>Activation Quantization：保留 A8，不虚构 A3</h2>
+    <h2 id="activation"><span class="idx">4</span>Activation Quantization：保留 A8；当前不支持 A3</h2>
     <h3>4.1 A8 Accuracy</h3>
     <p>
       A8 使用 E4M3 values，每个 A row 中连续 32 个 K values 共用一个 UE8M0 scale。W 保持 BF16，以隔离
@@ -616,7 +631,7 @@ two K32    = reference + 16 K32-SFB factors       = 216 B = 3.375 bit/W</code></
       </tbody>
     </table></div>
 
-    <h3>4.2 Why A3 Has No Kernel Estimate</h3>
+    <h3>4.2 为什么当前 LUT-B 不支持 A3 作为 Matrix A</h3>
     <div class="table-wrap"><table class="data">
       <thead><tr><th>Layout</th><th>Matrix A</th><th>Matrix B</th><th>Result</th></tr></thead>
       <tbody>
@@ -627,11 +642,12 @@ two K32    = reference + 16 K32-SFB factors       = 216 B = 3.375 bit/W</code></
       </tbody>
     </table></div>
     <div class="callout">
-      本文刻意不画 A3 performance chart。Activation 每个 token 动态产生，需要 online assignment/packing；
-      更关键的是公开 Rubin PTX 没有 dual-LUT MMA。把 A3 与 W3/KV3 同时建模会描述一个当前 ISA 无法编码的 kernel。
+      当前公开 Rubin PTX 没有 LUT-A 或 dual-LUT MMA，所以 A3 不能作为 matrix A 与 B 中的 W3/KV3 配对。
+      Activation 又是动态产生的，还需要 online assignment/packing。这是当前不受支持的 operand configuration，
+      因此没有 performance chart。
     </div>
 
-    <h2 id="kv"><span class="idx">5</span>KV Cache Quantization <span class="faint">— Path to 10M-Token Context</span></h2>
+    <h2 id="kv"><span class="idx">5</span>KV Cache Quantization <span class="faint">— Accuracy、Speed 与 Capacity Bounds</span></h2>
     <h3 id="sec3">5.1 Kernel Mapping：把 LUT-B 映射到 Attention</h3>
     <p>
       Rubin LUT-B 有一条最重要的规则：<strong>它只在 MMA 内解压 matrix B</strong>。因此我们不把整个 attention
@@ -838,29 +854,9 @@ two K32    = reference + 16 K32-SFB factors       = 216 B = 3.375 bit/W</code></
       physical cache 仍会 reconstruct 成 BF16（见 <a href="#repro">Reproducibility</a>）。
     </p>
 
-    <h3 id="capacity">5.3 Simulation Estimate：TP8 MLA Capacity</h3>
-    <p>
-      10M 是 single canonical copy + runtime retiling 分支，不是 Kimi K3 已支持 10M。假设 8×288 GB Rubin、
-      1.56 TB weights 完美 TP8 shard、24 个 MLA layers、512-d K3V3 latent、64-d BF16 RoPE suffix，并为
-      runtime 留 14.3 GB/GPU：
-    </p>
-    <div class="table-wrap"><table class="data">
-      <thead><tr><th>Physical latent layout</th><th class="num">Latent B/token/layer</th><th class="num">All-layer B/token</th><th class="num">Zero-reserve ceiling</th><th class="num">14.3 GB reserve</th></tr></thead>
-      <tbody>
-        <tr><td><strong>Single canonical copy + runtime retile</strong></td><td class="num">200 B</td><td class="num">7,872 B</td><td class="num">11.81M</td><td class="num"><strong>10.00M</strong></td></tr>
-        <tr><td>Two direct K-like/V-like layouts</td><td class="num">400 B</td><td class="num">12,672 B</td><td class="num">7.34M</td><td class="num">6.21M</td></tr>
-      </tbody>
-    </table></div>
-<pre><code>single copy: 24 × [320 × 1152 B + (L − 320) × 328 B] ≤ budget
-dual layout: 24 × [320 × 1152 B + (L − 320) × 528 B] ≤ budget</code></pre>
-    <p>
-      Public PTX rejects transposed LUT-B，因此一份 physical layout 不能直接同时作为 <code>c_KVᵀ</code> 与
-      <code>c_KV</code>。10M 必须把 retile cost 作为尚未实现、尚未测量的 kernel requirement。
-    </p>
+    <h3 id="throughput">5.3 Kernel Performance Model：Rubin 上理论能到哪里？</h3>
 
-    <h3 id="throughput">5.4 Kernel Performance Model：Rubin 上理论能到哪里？</h3>
-
-    <h4>5.4.1 Hardware Baseline</h4>
+    <h4>5.3.1 Hardware Baseline</h4>
     <p>
       先看单 GPU hardware。H100 和 B200 可以作为 bandwidth baseline，但它们没有 SM107 的
       <code>decompress::lut::b</code>；只有 Rubin 能原生执行本文的 K3V3 LUT-B path。
@@ -871,22 +867,23 @@ dual layout: 24 × [320 × 1152 B + (L − 320) × 528 B] ≤ budget</code></pre
       <tbody>
         <tr><td>H100 SXM</td><td>HBM3</td><td class="num">80 GB</td><td class="num">3.35 TB/s</td><td class="num">1.979 PFLOP/s</td><td><span class="no">No</span></td></tr>
         <tr><td>B200 SXM</td><td>HBM3e</td><td class="num">180 GB</td><td class="num">up to 8 TB/s</td><td class="num">4.5 PFLOP/s</td><td><span class="no">No</span></td></tr>
-        <tr><td>Rubin</td><td>HBM4</td><td class="num">288 GB</td><td class="num">22 TB/s</td><td class="num">8.75 PFLOP/s assumption</td><td><span class="ok">Yes</span></td></tr>
+        <tr><td>Rubin</td><td>HBM4</td><td class="num">288 GB</td><td class="num">22 TB/s</td><td class="num">17.5 PFLOP/s published dense</td><td><span class="ok">Yes</span></td></tr>
       </tbody>
     </table></div>
     <p>
       H100 数据来自 <a href="https://www.nvidia.com/en-us/data-center/h100/">NVIDIA H100 specs</a>；B200 使用
       <a href="https://docs.nvidia.com/enterprise-reference-architectures/hgx-ai-factory/latest/components.html">NVIDIA HGX component specs</a>
-      的 180 GB / up to 8 TB/s，以及公开 4.5 PFLOP/s dense FP8；Rubin 的 8.75 PFLOP/s 是将 17.5 PFLOP/s
-      published sparse peak 折半后的 modeling assumption。这个 peak 只有在 MMA tile 被填满时才成立；
-      single-token decode 不能直接把它当成 compute ceiling。
+      的 180 GB / up to 8 TB/s，以及公开 4.5 PFLOP/s dense FP8。NVIDIA 把 Rubin 的 17.5 PFLOP/s FP8/FP6
+      数字列为 dense specification；把它按 sparse peak 折半是不正确的。不过 NVIDIA 没有单独公开
+      <code>decompress::lut::b</code> throughput，所以 8.75/17.5 PFLOP/s 只能作为 sensitivity endpoints，
+      不能当作实测 LUT-B rate。
     </p>
     <p>
       Qwen3-4B-Thinking-2507 有 36 layers、32 Q heads、8 KV heads、head dim 128。每个 decode token 的
       attention logical FLOPs 为 <code>4 × Q_heads × head_dim × context × layers</code>。
     </p>
 
-    <h4>5.4.2 如果三张卡都读取 BF16 KV</h4>
+    <h4>5.3.2 如果三张卡都读取 BF16 KV</h4>
     <p>BF16 KV 下 arithmetic intensity 只有 4 FLOP/B，因此三张卡都明显 HBM-bound。</p>
     <div class="table-wrap"><table class="data">
       <thead><tr><th>GPU</th><th class="num">8K BF16 roofline</th><th class="num">8K attention-only tok/s</th><th class="num">32K BF16 roofline</th><th class="num">32K attention-only tok/s</th></tr></thead>
@@ -900,7 +897,7 @@ dual layout: 24 × [320 × 1152 B + (L − 320) × 528 B] ≤ budget</code></pre
       这里 TFLOP/s 随 context 不变，是因为 BF16 arithmetic intensity 固定；token/s 会随 context 变长而下降。
     </p>
 
-    <h4>5.4.3 K3V3 Roofline：Compressed Bytes 与 B-only Tile</h4>
+    <h4>5.3.3 K3V3 Roofline：Compressed Bytes 与 B-only Tile</h4>
     <p>
       K3V3 加上 BF16 sink/recent 后，8K 的 effective storage 是 3.628 bit/value，32K 是 3.251 bit/value；
       对应 arithmetic intensity 为 17.64 / 19.69 FLOP/B。
@@ -972,7 +969,7 @@ dual layout: 24 × [320 × 1152 B + (L − 320) × 528 B] ≤ budget</code></pre
       当前 public PTX 与 compile probes 不能假设它存在。
     </p>
 
-    <h4>5.4.4 Operand-corrected Practical Range</h4>
+    <h4>5.3.4 Operand-corrected Practical Range</h4>
     <div class="table-wrap"><table class="data">
       <thead><tr><th class="num">Context</th><th class="num">Effective KV bits/value</th><th class="num">Byte-only HBM roofline</th><th class="num">B-only tile-corrected ceiling</th><th class="num">Expected @ 60–80%</th><th class="num">Corrected tok/s</th><th class="num">vs Rubin BF16</th></tr></thead>
       <tbody>
@@ -992,38 +989,65 @@ dual layout: 24 × [320 × 1152 B + (L − 320) × 528 B] ≤ budget</code></pre
       communication 和 power throttling；它们不等于 Qwen3-4B end-to-end output token/s，也不是 Rubin 实机成绩。
     </div>
 
-    <h2 id="limitations"><span class="idx">6</span>Limitations：哪些必须等 Rubin 实机？</h2>
+    <h4 id="capacity">5.3.5 不同并发 Request 的 HBM Context Bound</h4>
+    <p>
+      对一个 Kimi-K3 TP8 replica，假设每张 GPU 288 GB、sharded weights 占 195 GB、runtime reserve 为
+      14.3 GB，共 24 个 MLA layers，且 requests 等长。每个 request 的算术上限是
+      <code>L ≤ capacity pool ÷ concurrent requests</code>。Single canonical latent 在 BF16 sink/recent
+      window 之后使用 328 B/token/layer 并需要 runtime retiling；two direct layouts 使用 528 B/token/layer。
+    </p>
+    <div class="table-wrap"><table class="data">
+      <thead><tr><th class="num">Concurrent requests / TP8 replica</th><th class="num">Single canonical layout</th><th class="num">Two direct layouts</th></tr></thead>
+      <tbody>
+        <tr><td class="num">1</td><td class="num">10.00M / request</td><td class="num">6.21M / request</td></tr>
+        <tr><td class="num">2</td><td class="num">5.00M / request</td><td class="num">3.11M / request</td></tr>
+        <tr><td class="num">4</td><td class="num">2.50M / request</td><td class="num">1.55M / request</td></tr>
+        <tr><td class="num">8</td><td class="num">1.25M / request</td><td class="num">0.78M / request</td></tr>
+        <tr><td class="num">16</td><td class="num">0.63M / request</td><td class="num">0.39M / request</td></tr>
+      </tbody>
+    </table></div>
+    <p>
+      这只是 HBM allocation bound，不会扩展 checkpoint 的 positional limit，也不验证 long-context quality；
+      allocator fragmentation、communication、page tables 与 retiling work 均未计入。
+    </p>
+
+    <h2 id="limitations"><span class="idx">6</span>Limitations</h2>
     <ol>
-      <li><strong>W3A8 quality 已测，但 packed Rubin kernel 未测。</strong>3.375-bit payload 和 compile legality
-        是确定的，achieved latency 不是。</li>
-      <li><strong>A3 没有 joint W3/KV3 path。</strong>公开 PTX 只有 LUT-B，没有 LUT-A，因此本文不提供 A3 speed curve。</li>
-      <li><strong>MLA single-copy 需要 runtime retiling。</strong>如果实际 kernel 不能高效 retile，同一
-        <code>c_KV</code> 必须保存两份 direct layouts，capacity 从 10M 降到约 6.2M。</li>
-      <li><strong>LUT-B throughput 未公开。</strong>8.75/17.5 PFLOP/s 只是 sensitivity endpoints，不是 prediction interval。</li>
-      <li><strong>10M 是 HBM arithmetic，不是模型已支持的 context。</strong>Kimi K3 checkpoint 仍是 1M
-        positional limit，quality 只在 8K 测量。</li>
+      <li><strong>Quality 来自 numerical simulation，不是 packed Rubin execution。</strong>H100/B200 在
+        multiply 前恢复 fake-quantized tensors。Index/LUT/SFB format 被显式模拟，但最终 fused Weight/KV
+        kernels 尚未在 Rubin 上运行。</li>
+      <li><strong>Full-tile LUT-B throughput 未知。</strong>8.75/17.5-PFLOP/s 只用于观察结果对这一未知量的
+        敏感性；fused softmax、page traversal、row packing、collector reuse 与 achieved HBM bandwidth
+        共同决定实机结果。</li>
+      <li><strong>Layout work 取决于 architecture 与 deployment。</strong>H64/OSCAR transforms、dynamic
+        cache packing、MLA retiling、tensor/context sharding 与 hybrid non-attention layers 都不在 isolated
+        GEMM roofline 内，end-to-end implementation 必须计入。</li>
     </ol>
 
-    <h2 id="sec5"><span class="idx">7</span>这个故事目前说明了什么？</h2>
-    <ol>
-      <li><strong>W3A8 物理上自然，但“3-bit”本身不是 accuracy method。</strong>所有 strict rows 都是
-        3.375 bits/weight；H64+GPTQ 保持稳定，uniform/NF3 在 Gemma 与 MiniMax 上完全崩溃。</li>
-      <li><strong>A8 是兼容的 activation partner。</strong>到 128K 仍只有很小 KL；A3 会占用唯一 LUT-B，
-        把 W3A3 退化成 W8A3，因此不应给出 performance estimate。</li>
-      <li><strong>普通的 3-bit KV 无法承担 serving。</strong>Naive uniform INT3 直接崩溃 —— 8K PPL 从 9.468
-        涨到 1504、KL₅₀ 涨到 5.15，任何 sink/recent 窗口都救不回来。</li>
-      <li><strong>OSCAR + Lloyd-Max 能把质量带回来。</strong>离线 per-layer codebook 加 rotation/clipping 把
-        Qwen3-4B 拉回 PPL ≈ 10.4、KL₅₀ 最低，并把 Kimi K3 的 GPQA 从 83.16% 提到 89.73% —— 全部在 ISA 规定的
-        Q/P 契约（E4M3 + UE8M0 block32）下完成。</li>
-      <li><strong>Dense KV-on-LUT-B 没有 legality blocker，但有 decode-shape blocker。</strong>PTX 不要求 B
-        必须是 static weight；<code>Kᵀ</code> 和 <code>V</code> 可以成为动态 compressed B，但 B-only + MXFP8
-        M=128 会限制 single-token tile occupancy。</li>
-      <li><strong>Performance 不只看 bytes。</strong>只算 bytes 是 H100 BF16 的 29–32×，tile-corrected
-        single-token 上限约 20.4×（60–80% 执行效率下 12.3–16.4×）；GQA packing、multi-token decode 与
-        small-M path 决定 Tensor Core 能否吃到这些带宽收益。</li>
-      <li><strong>10M 是 single-copy 分支。</strong>它需要 runtime retiling；如果保存两份 direct MLA
-        layouts，相同 14.3 GB reserve 下的 capacity 是 6.21M。</li>
-    </ol>
+    <h2 id="takeaways"><span class="idx">7</span>Conclusions：Accuracy 与 Performance</h2>
+    <h3>7.1 Accuracy</h3>
+    <ul>
+      <li><strong>A8 稳定；当前所需 operand position 不支持 A3。</strong>8K–128K 的 A8-only KL₅₀ 都不超过
+        0.05375。当前 LUT-B 没有 LUT-A，因此 W3A3/KV3A3 无法用同一条 MMA。</li>
+      <li><strong>W3 quality 更依赖算法，而不是“3-bit”这个名字。</strong>H64+GPTQ 是跨模型最稳健的 family；
+        uniform/NF3 会崩溃。Native SFB、global scale、K64 与 two-K32 都会改变 quality，但没有一个 schedule
+        在所有模型和 context 上都获胜。</li>
+      <li><strong>KV3 需要 nonuniform codebook，困难场景还需要 rotation。</strong>Uniform Qwen K3V3 达到
+        PPL 1504/KL₅₀ 5.15；offline Lloyd-Max 把 PPL 拉回约 10.4。Latent OSCAR 把 Kimi K3 从
+        1.601/0.00800 改善到 1.564/0.00679，并把 GPQA 三种子从 83.16% 提到 89.73%。</li>
+    </ul>
+    <h3>7.2 Performance</h3>
+    <ul>
+      <li><strong>Weight 是最干净的 LUT-B deployment。</strong>Static <code>Wᵀ</code> 可以离线 fit/pack。
+        One-K64 native-SFB 的 3.25-bit payload 按明确的 bandwidth-and-byte 公式得到相对 H100/B200 BF16
+        的 32.31×/13.54× weight-read bound；它们不是 model speedup。</li>
+      <li><strong>KV 随 context 增长节省更多 bytes，但 decode shape 决定 utilization。</strong>GQA4
+        single-token decode 只有 4/128 M-row occupancy；MLA 可让多个 local heads 复用同一 latent，不继承
+        相同的 underfill。</li>
+      <li><strong>Qwen attention-only 结果是 sensitivity range，不是 point forecast。</strong>1M 时分析区间
+        是 H100 BF16 的 20.4×–33.6×。Request-capacity table 同样只是 HBM allocation arithmetic；必须有
+        silicon measurement 与 fused runtime 才能给 end-to-end claim。</li>
+    </ul>
 
     <h2 id="repro">Reproducibility</h2>
     <p>全部从公开的 OSCAR branch 运行，所有路径相对于 repository root：</p>
@@ -1032,7 +1056,7 @@ git checkout zhongzhu/oscar-int3-rubin-simulate</code></pre>
     <ul>
       <li><strong>Weight W3A8 quality：</strong><code>rubin/w3a8_lut_sim.py</code> 与
         <code>rotation/multimodel/</code> 下的 manifests 重现 8K/64K/128K rows。</li>
-      <li><strong>KV speed tables（§5.4）：</strong><code>python3 rubin/rubin_k3v3_roofline.py --compare-hardware</code>
+      <li><strong>KV speed tables（§5.3）：</strong><code>python3 rubin/rubin_k3v3_roofline.py --compare-hardware</code>
         —— 只依赖 Python 标准库。</li>
       <li><strong>ISA compile proof：</strong><code>rubin/run_compile_probes.py
         --cuda /usr/local/cuda-13.4</code> —— 需要 CUDA 13.4 preview toolchain；校验生成的 SASS 包含
@@ -1143,6 +1167,9 @@ const W_METHODS = {
   nf3:     { label: "NF3", color: "#b55f5f", bits: 3.375, kernel: "Static zero-aware NF3 LUT; same storage, poor measured quality." },
   uniform: { label: "Uniform", color: "#a33d2f", bits: 3.375, kernel: "Uniform tile LUT; same storage, catastrophic measured quality." },
 };
+const W_SELECTOR_METHODS = [
+  "bf16", "a8", "h64_k64g", "h64_k32g", "rms_k64g", "rms_k32g", "gptq", "awq", "lm",
+];
 const W_DATA = {
   qwen: { label: "Qwen3-4B", values: {
     8192:   { bf16:[9.447,0], a8:[9.508,.00559], h64:[11.504,.24232], h64_k64g:[11.664,.24494], h64_k32g:[11.500,.27527], gptq:[13.057,.34194], rms:[12.890,.38058], rms_k64g:[13.215,.40095], rms_k32g:[12.640,.36268], awq:[13.813,.38270], lm:[13.580,.41725], scale:[14.148,.44276], squeeze:[14.551,.48394], nf3:[30.295,1.35188], uniform:[91.387,2.26996] },
@@ -1160,7 +1187,7 @@ const W_DATA = {
     131072: { bf16:[4.124,0], a8:[4.115,.01756], h64:[5.076,.20916], h64_k64g:[5.078,.23976], h64_k32g:[5.032,.21195], gptq:[5.327,.24296], awq:[5.404,.29059], rms:[6.474,.42795], rms_k64g:[5.014,.17007], rms_k32g:[4.986,.18677], squeeze:[6.513,.43720], lm:[7.488,.58320], scale:[7.835,.65367], uniform:[535932.314,12.15861], nf3:[2032820.392,13.30284] },
   }},
 };
-const wState = { model: "qwen", ctx: 131072, method: "h64", view: "focus" };
+const wState = { model: "qwen", ctx: 131072, method: "h64_k32g", view: "focus" };
 
 /* ============================================================
    Data — Qwen3-4B-Thinking-2507
@@ -1259,7 +1286,7 @@ function renderWeightChart() {
     ? allRows.filter(r => r.kl <= focusMax)
     : allRows;
   const width = Math.max(300, svg.parentElement.clientWidth - 36);
-  const H = 154, mL = 14, mR = 16, mT = 30, mB = 32;
+  const H = 166, mL = 14, mR = 16, mT = 42, mB = 32;
   const plotBot = H - mB, innerW = width - mL - mR;
   const hi = wState.view === "focus"
     ? focusMax
@@ -1300,9 +1327,13 @@ function renderWeightChart() {
     c.addEventListener("click", () => { wState.method=d.r.key; hideTip(); renderWeight(); });
     if (selected) {
       el("circle", { cx:d.x, cy:y, r:13, fill:"none", stroke:d.r.color, "stroke-width":1.6, "stroke-dasharray":"2.5 3" }, svg);
-      const tx = Math.min(Math.max(d.x, mL+44), width-mR-44);
-      const label = el("text", { x:tx, y:mT-10, "text-anchor":"middle", "font-size":11, "font-weight":700, fill:d.r.color }, svg);
-      label.textContent = d.r.label+" "+(d.r.kl < .1 ? d.r.kl.toFixed(4) : d.r.kl.toFixed(3));
+      const labelText = d.r.label+" "+(d.r.kl < .1 ? d.r.kl.toFixed(4) : d.r.kl.toFixed(3));
+      const labelW = Math.min(width-mL-mR, Math.max(88, labelText.length*6.3+16));
+      const tx = Math.min(Math.max(d.x, mL+labelW/2), width-mR-labelW/2);
+      el("line", { x1:tx, y1:25, x2:d.x, y2:y-13, stroke:d.r.color, "stroke-width":1, "stroke-dasharray":"2 3", opacity:.65 }, svg);
+      el("rect", { x:tx-labelW/2, y:4, width:labelW, height:22, rx:6, fill:"#fcfaf4", stroke:d.r.color, "stroke-width":1 }, svg);
+      const label = el("text", { x:tx, y:19, "text-anchor":"middle", "font-size":11, "font-weight":700, fill:d.r.color }, svg);
+      label.textContent = labelText;
     }
   });
 }
@@ -1341,7 +1372,7 @@ function renderWeight() {
   seg("wSegCtx", [[8192,"8K"],[65536,"64K"],[131072,"128K"]], wState.ctx, k => {
     wState.ctx=+k; renderWeight();
   });
-  seg("wSegMethod", weightRows().map(r => [r.key,r.label]), wState.method, k => {
+  seg("wSegMethod", weightRows().filter(r => W_SELECTOR_METHODS.includes(r.key)).map(r => [r.key,r.label]), wState.method, k => {
     wState.method=k;
     if (values[k][1] > 1) wState.view="all";
     renderWeight();
@@ -1509,21 +1540,25 @@ function renderSpeed() {
   const sp = speedAt(hx.ctx);
   const ctxL = CTX_LABEL[hx.ctx];
   if (!M.speed) {
-    $("hxTokK").textContent = "TP8 MLA mathematical context capacity";
+    $("hxTokK").textContent = "TP8 HBM context bound per request";
     const host0 = $("hxBars");
     host0.innerHTML = "";
     const selected = hx.layout === "single" ? 10.00 : 6.21;
-    $("hxTok").textContent = selected.toFixed(2) + "M";
+    $("hxTok").textContent = selected.toFixed(2) + "M @ R=1";
     $("hxTok").style.color = hx.layout === "single" ? "#8a6a14" : "#6e6a5c";
     $("hxTokSub").textContent = hx.layout === "single"
       ? "single canonical c_KV copy \u00b7 runtime retiling required"
       : "two direct QK/PV layouts \u00b7 400 B latent/token/layer";
-    barRow(host0, "Single copy + retile", 10.00, 10.00, "#8a6a14", { valText: "10.00M" });
-    barRow(host0, "Two direct layouts", 6.21, 10.00, "#6e6a5c", { valText: "6.21M" });
+    [1,2,4,8].forEach(r => {
+      const perRequest = selected / r;
+      barRow(host0, r+" request"+(r>1?"s":""), perRequest, selected,
+        hx.layout === "single" ? "#8a6a14" : "#6e6a5c",
+        { valText: perRequest.toFixed(2)+"M / request" });
+    });
     const hint = document.createElement("div");
     hint.className = "chart-hint";
     hint.style.textAlign = "left";
-    hint.textContent = "14.3 GB runtime reserve/GPU. Current checkpoint positional limit remains 1M.";
+    hint.textContent = "Equal-length requests; HBM arithmetic only. The checkpoint positional limit remains 1M.";
     host0.appendChild(hint);
     return;
   }
