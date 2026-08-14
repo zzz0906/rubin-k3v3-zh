@@ -1155,7 +1155,7 @@ const W_METHODS = {
   a8:      { label: "A8-only", color: "#6e6a5c", bits: 16, kernel: "BF16 W; E4M3 + UE8M0 K32 QDQ on A." },
   h64:     { label: "H64 · K32", color: "#3e6b5f", bits: 3.375, kernel: "Two K32 MMAs, native K32 SFA/SFB, no global scale; matching signed H64 on A." },
   h64_k64g:{ label: "H64 · K64+G", color: "#2f7f6c", bits: 3.25, kernel: "One K64 MMA, 8 native SFB values, folded tensor-global FP32 scale, and signed H64 on A." },
-  h64_k32g:{ label: "H64 · 2K32+G", color: "#4d8f68", bits: 3.375, kernel: "Two K32 MMAs, 16 native SFB values, folded tensor-global FP32 scale, and signed H64 on A." },
+  h64_k32g:{ label: "Hadamard64 + GPTQ + 2K32 + Global Scale", color: "#4d8f68", bits: 3.375, kernel: "Two K32 MMAs, 16 native SFB values, folded tensor-global FP32 scale, and signed H64 on A." },
   rms:     { label: "RMS² · K32", color: "#31607f", bits: 3.375, kernel: "Two K32 MMAs, native K32 SFA/SFB, no global scale; RMS² weighting offline." },
   rms_k64g:{ label: "RMS² · K64+G", color: "#4d55a5", bits: 3.25, kernel: "One K64 MMA, 8 native SFB values, folded tensor-global FP32 scale; RMS² weighting offline." },
   rms_k32g:{ label: "RMS² · 2K32+G", color: "#6971b8", bits: 3.375, kernel: "Two K32 MMAs, 16 native SFB values, folded tensor-global FP32 scale; RMS² weighting offline." },
