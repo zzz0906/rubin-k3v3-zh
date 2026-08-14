@@ -282,12 +282,11 @@
   <section class="fig-card" id="weight-explorer" aria-label="Weight 精度与存储交互对比">
     <div class="fig-head">
       <span class="fig-tag">图 1 · Interactive Weight</span>
-      <span class="fig-title">W3 two-K32 schedule：固定 scale layout 比较算法</span>
+      <span class="fig-title">W3 methods：K64/two-K32 schedules 与 paired scales</span>
     </div>
     <p class="fig-sub">
-      选择 model、context 与 method。左侧是实测 WikiText-2 PPL/KL₅₀，右侧是 payload 与 byte roofline。
-      这组 algorithm sweep 固定使用自洽的 two-K32 SFA/SFB schedule；下文另行测量 CUDA 13.4 的 3.125-bit
-      与 3.25-bit native-SFB contract。
+      选择 model、context 与 method。“Global” methods 始终同时包含 native SFB block scale 和一个 folded
+      tensor-global FP32 scale。左侧是实测 PPL/KL₅₀，右侧是 payload 与 weight-only byte roofline。
     </p>
     <div class="controls">
       <div class="ctrl"><div class="ctrl-label">Model</div><div class="seg" id="wSegModel"></div></div>
@@ -307,7 +306,7 @@
       </div>
       <div class="panel">
         <div class="panel-head">
-          <div class="stat-k">Two-K32 SFA/SFB weight-read ceiling</div>
+          <div class="stat-k">Selected method weight-read ceiling</div>
           <div class="stat-v" id="wxBits">–</div>
           <div class="stat-s" id="wxRatio">–</div>
         </div>
@@ -318,8 +317,8 @@
     <div class="fig-note">
       <b>Contract correction。</b>Linear weight 是 W[N,K]，B=Wᵀ[K,N]。CUDA reference tile 是 512 indices +
       一个 E4M3 LUT，即 3.125 bits/weight。可选 native block scaling 每个 N row 增加一个 UE8M0 SFB
-      （8 bytes/tile），得到 3.25 bits/weight。上面的 3.375-bit 数字来自两个 K32 MMAs 与 16 个 factors；
-      它是可实现的 two-instruction schedule，不是单条 K64 instruction。详见 <a href="#scale-audit">§3.1</a>。
+      （8 bytes/tile），得到 3.25 bits/weight。Two-K32 使用 16 个 factors 与 3.375 bits/weight。Global scale
+      是 folded software metadata，不是 native LUT-B operand。
     </div>
   </section>
 
@@ -402,9 +401,9 @@
       <h2>TL;DR</h2>
       <ol>
         <li><strong>Weight 是最自然的 LUT-B target，但 scale contract 必须分清。</strong>CUDA 13.4 reference
-          LUT-only B payload 是 3.125 bits/weight，single-K64 native SFB 是 3.25 bits/weight。原 3.375-bit
-          sweep 是自洽的 two-K32 schedule。Folded global scale 会改善两个模型的 LUT-only K64 path；加入
-          native SFB 后，它帮助 Qwen、却恶化 Gemma。</li>
+          LUT payload 是 3.125 bits/weight；paired SFB+global 在 one-K64 下是 3.25、two-K32 下是 3.375。
+          Two-K32 一致改善 RMS² quality，H64 winner 取决于 model/context。Qwen/Gemma/MiniMax paired-scale
+          cells 现已全部实测。</li>
         <li><strong>A3 不是第二个免费的 low-bit operand。</strong>公开 PTX 只有 LUT-B。W3 已占用 B，因此
           native A3 会迫使 W 回到 FP8，变成 W8A3。本文保留 E4M3 + UE8M0 K32 的 A8，不虚构 A3 speed。</li>
         <li><strong>KV 能用同一条指令，但 layout 更难。</strong>QK group 是 8 tokens × 64 head channels；
@@ -526,60 +525,36 @@ effective         = 3.125 bit/value</code></pre>
 
     <h3>3.1 Accuracy</h3>
     <p>
-      下表 algorithm sweep 固定使用同一个自洽 3.375-bit two-K32 SFA/SFB schedule，不带 sparse residual，
-      也没有隐藏的高精度 outlier path。128K protocol 是一个
-      131072-token block、131071 scored tokens 和 256 个 KL₅₀ samples。这里是
-      GPTQ<span class="cite"><a href="#ref-gptq">[4]</a></span>、AWQ<span class="cite"><a href="#ref-awq">[5]</a></span>、
-      SqueezeLLM<span class="cite"><a href="#ref-squeezellm">[6]</a></span>、QuaRot 使用的 randomized Hadamard
-      rotation<span class="cite"><a href="#ref-quarot">[7]</a></span> 和 QLoRA normal-float
-      idea<span class="cite"><a href="#ref-qlora">[8]</a></span> 的 hardware-constrained adaptation。
-      Activation-RMS² 与 UE8M0 scale search 是本文的 offline heuristics，codebook 仍使用
-      Lloyd-Max<span class="cite"><a href="#ref-max">[1]</a><a href="#ref-lloyd">[2]</a></span>；uniform 是标准
-      scalar-quantization baseline<span class="cite"><a href="#ref-quant">[9]</a></span>。
+      表格保留原 two-K32 rows，并加入 one-K64/two-K32 的 native SFB + tensor-global scale rows。
+      PPL/KL 使用一个 131072-token block 与 256 个 KL₅₀ samples。方法包括 GPTQ
+      <span class="cite"><a href="#ref-gptq">[4]</a></span>、QuaRot-style H64
+      <span class="cite"><a href="#ref-quarot">[7]</a></span>，以及 RMS²-weighted Lloyd-Max
+      <span class="cite"><a href="#ref-max">[1]</a><a href="#ref-lloyd">[2]</a></span>。
     </p>
     <div class="table-wrap"><table class="data">
-      <caption>Algorithm comparison under one self-consistent two-K32 SFA/SFB schedule</caption>
+      <caption>128K accuracy; every “+ global” row also includes native SFB block scaling</caption>
       <thead><tr><th>128K method</th><th class="num">Qwen PPL / KL₅₀</th><th class="num">Gemma PPL / KL₅₀</th><th class="num">MiniMax routed PPL / KL₅₀</th></tr></thead>
       <tbody>
         <tr><td>BF16 W + BF16 A</td><td class="num"><strong>8.482 / 0.00000</strong></td><td class="num"><strong>5.771 / 0.00000</strong></td><td class="num"><strong>4.124 / 0.00000</strong></td></tr>
         <tr><td>BF16 W + A8</td><td class="num">8.547 / 0.00504</td><td class="num">5.786 / 0.02114</td><td class="num">4.115 / 0.01756</td></tr>
-        <tr><td>Random-H64 + K64 LUT-GPTQ [4,7]</td><td class="num"><strong>10.504 / 0.28601</strong></td><td class="num"><strong>7.034 / 0.37273</strong></td><td class="num"><strong>5.076 / 0.20916</strong></td></tr>
-        <tr><td>Activation-RMS²-weighted Lloyd-Max (ours) [1,2]</td><td class="num">11.613 / 0.36921</td><td class="num">7.706 / 0.55274</td><td class="num">6.474 / 0.42795</td></tr>
+        <tr><td>Random-H64 + K64 LUT-GPTQ [4,7] (two-K32, no global)</td><td class="num"><strong>10.504 / 0.28601</strong></td><td class="num"><strong>7.034 / 0.37273</strong></td><td class="num"><strong>5.076 / 0.20916</strong></td></tr>
+        <tr><td>Random-H64 + K64 LUT-GPTQ + K64 SFB + global</td><td class="num">10.899 / 0.26852</td><td class="num">7.169 / <strong>0.27815</strong></td><td class="num">5.078 / 0.23976</td></tr>
+        <tr><td>Random-H64 + K64 LUT-GPTQ + two-K32 SFB + global</td><td class="num">10.643 / <strong>0.25499</strong></td><td class="num">7.067 / 0.37087</td><td class="num"><strong>5.032 / 0.21195</strong></td></tr>
+        <tr><td>Activation-RMS²-weighted Lloyd-Max (ours) [1,2] (two-K32, no global)</td><td class="num">11.613 / 0.36921</td><td class="num">7.706 / 0.55274</td><td class="num">6.474 / 0.42795</td></tr>
+        <tr><td>Activation-RMS² Lloyd-Max + K64 SFB + global</td><td class="num">12.188 / 0.43398</td><td class="num">8.395 / 0.65079</td><td class="num">5.014 / <strong>0.17007</strong></td></tr>
+        <tr><td>Activation-RMS² Lloyd-Max + two-K32 SFB + global</td><td class="num">11.653 / 0.39943</td><td class="num">8.247 / 0.61031</td><td class="num"><strong>4.986</strong> / 0.18677</td></tr>
         <tr><td>K64 block-diagonal LUT-GPTQ [4]</td><td class="num">12.471 / 0.38442</td><td class="num">7.822 / 0.50819</td><td class="num">5.327 / 0.24296</td></tr>
         <tr><td>UE8M0-scale search + Lloyd-Max (ours) [1,2]</td><td class="num">12.845 / 0.43388</td><td class="num">193.054 / 3.54611</td><td class="num">7.835 / 0.65367</td></tr>
         <tr><td>Folded AWQ + Lloyd-Max [1,2,5]</td><td class="num">12.666 / 0.45302</td><td class="num">10.719 / 0.83232</td><td class="num">5.404 / 0.29059</td></tr>
         <tr><td>Lloyd-Max W3A8 [1,2] (MiniMax: routed-expert w13/w2 W3 only; A remains BF16)</td><td class="num">12.703 / 0.48603</td><td class="num">180.144 / 3.67195</td><td class="num">7.488 / 0.58320</td></tr>
-        <tr><td>MiniMax routed-expert w13/w2 Lloyd-Max W3 + dispatched expert-input A8</td><td class="num">N/A</td><td class="num">N/A</td><td class="num">7.456 / 0.59566</td></tr>
         <tr><td>Dense-only SqueezeLLM [6]</td><td class="num">13.332 / 0.49994</td><td class="num">11.180 / 1.02137</td><td class="num">6.513 / 0.43720</td></tr>
         <tr><td>Zero-aware NF3 (normal-float adaptation) [8]</td><td class="num">29.646 / 1.26669</td><td class="num">4358.944 / 6.57245</td><td class="num">2032820.392 / 13.30284</td></tr>
         <tr><td>Uniform scalar quantization [9]</td><td class="num">162.126 / 2.89007</td><td class="num">19733.351 / 7.98959</td><td class="num">535932.314 / 12.15861</td></tr>
       </tbody>
     </table></div>
     <p>
-      Random-H64 + GPTQ 是三个 context、三个模型里最稳定的 measured W3A8 recipe。但它不是免费 offline
-      trick：W 可以 offline rotate，A 在 runtime 必须执行对应 signed H64。Gemma 上普通 tile-local LM
-      已明显不稳定，Folded AWQ 与 SqueezeLLM 说明同样 bits 下 algorithm support 是必要的。
-    </p>
-
-    <h4 id="scale-audit">3.1.1 CUDA 13.4 Scale-contract Audit</h4>
-    <p>
-      使用同一个 H64 + K64 LUT-GPTQ method、相同 16×8192 blocks 与 256 KL₅₀ samples。前四行使用一条
-      K64 MMA 与 K64 SFA/SFB；最后一行使用两条 K32 MMA 与 K32 SFA/SFB。PTX 没有 standalone global
-      numeric-scale operand；global 是每个 tensor 一个 FP32 scale，必须 fold 到 projection/epilogue。
-    </p>
-    <div class="table-wrap"><table class="data">
-      <thead><tr><th>LUT-B B contract</th><th class="num">Bits/W</th><th class="num">Qwen PPL / KL₅₀</th><th class="num">Gemma PPL / KL₅₀</th><th>Kernel implication</th></tr></thead>
-      <tbody>
-        <tr><td>K64 MXFP8 A + LUT only</td><td class="num"><strong>3.125</strong></td><td class="num">12.168 / 0.30774</td><td class="num">8.041 / 0.43087</td><td>SFB=1 synthesized; no stored SFB</td></tr>
-        <tr><td>K64 LUT + tensor-global scale</td><td class="num"><strong>3.125*</strong></td><td class="num">11.998 / 0.29491</td><td class="num">8.038 / 0.39899</td><td>Folded/epilogue FP32 scale</td></tr>
-        <tr><td>K64 native optional SFB (`scale_B=1×N`)</td><td class="num"><strong>3.250</strong></td><td class="num"><strong>11.596 / 0.25595</strong></td><td class="num"><strong>7.974 / 0.32932</strong></td><td>K64 SFA + 8 SFB factors/tile</td></tr>
-        <tr><td>K64 native SFB + tensor-global scale</td><td class="num"><strong>3.250*</strong></td><td class="num">11.664 / <strong>0.24494</strong></td><td class="num">8.021 / 0.37371</td><td>K64 SFA/SFB + folded scale</td></tr>
-        <tr><td>Two-K32 SFA/SFB schedule</td><td class="num">3.375</td><td class="num">11.504 / 0.24232</td><td class="num">7.924 / 0.34988</td><td>16 factors and two K32 MMAs</td></tr>
-      </tbody>
-    </table></div>
-    <p class="faint">
-      *每个 tensor 一个 4-byte FP32 scale，未计入 per-weight bits。Global scale 改善两个模型的 K64
-      LUT-only path；加入 native SFB 后，它改善 Qwen、却恶化 Gemma。
+      H64 和 RMS² 对 schedule/scale granularity 的响应不同。Two-K32+global 一致改善 RMS² 相对 K64+global；
+      H64 则取决于 model/context。H64 不是免费 offline trick，A 需要对应 runtime transform。
     </p>
 
     <h3>3.2 Kernel Organization</h3>
@@ -606,6 +581,14 @@ two K32    = reference + 16 K32-SFB factors       = 216 B = 3.375 bit/W</code></
         <tr><td>Reference LUT only</td><td class="num">3.125</td><td class="num"><strong>33.6×</strong></td><td class="num"><strong>14.1×</strong></td><td class="num">5.12×</td></tr>
         <tr><td>Native optional SFB</td><td class="num">3.250</td><td class="num"><strong>32.3×</strong></td><td class="num"><strong>13.5×</strong></td><td class="num">4.92×</td></tr>
         <tr><td>Two-K32 SFA/SFB schedule</td><td class="num">3.375</td><td class="num">31.1×</td><td class="num">13.0×</td><td class="num">4.74×</td></tr>
+      </tbody>
+    </table></div>
+    <div class="table-wrap"><table class="data">
+      <caption>One-K64 versus two-K32 under paired SFB + global scale</caption>
+      <thead><tr><th>Schedule</th><th class="num">SFB/tile</th><th class="num">Bits/W</th><th class="num">MMA instructions/K64</th><th>Measured tendency</th></tr></thead>
+      <tbody>
+        <tr><td>One K64</td><td class="num">8</td><td class="num">3.25</td><td class="num">1</td><td>Higher byte ceiling; coarser local scaling</td></tr>
+        <tr><td>Two K32</td><td class="num">16</td><td class="num">3.375</td><td class="num">2</td><td>Better RMS² quality; H64 depends on model/context</td></tr>
       </tbody>
     </table></div>
     <div class="callout">
@@ -1141,37 +1124,40 @@ function hideTip() { tip.style.display = "none"; }
 
 /* ============================================================
    Weight explorer data — WikiText-2, ~131K scored tokens/context.
-   Every non-BF16/A8 row uses the same 3.375-bit K64xN8 payload.
+   W3 rows explicitly identify K64/two-K32 schedules and paired-scale payload.
    ============================================================ */
 const W_METHODS = {
   bf16:    { label: "BF16", color: "#4a463c", bits: 16, kernel: "Dense BF16 GEMM; no LUT-B." },
   a8:      { label: "A8-only", color: "#6e6a5c", bits: 16, kernel: "BF16 W; E4M3 + UE8M0 K32 QDQ on A." },
-  h64:     { label: "H64+GPTQ", color: "#3e6b5f", bits: 3.375, kernel: "K64 LUT-GPTQ plus a matching signed H64 transform on A at runtime." },
-  rms:     { label: "RMS²-LM", color: "#31607f", bits: 3.375, kernel: "Activation-RMS² weighting is offline only; standard LUT-B GEMM at runtime." },
+  h64:     { label: "H64 · K32", color: "#3e6b5f", bits: 3.375, kernel: "Two K32 MMAs, native K32 SFA/SFB, no global scale; matching signed H64 on A." },
+  h64_k64g:{ label: "H64 · K64+G", color: "#2f7f6c", bits: 3.25, kernel: "One K64 MMA, 8 native SFB values, folded tensor-global FP32 scale, and signed H64 on A." },
+  h64_k32g:{ label: "H64 · 2K32+G", color: "#4d8f68", bits: 3.375, kernel: "Two K32 MMAs, 16 native SFB values, folded tensor-global FP32 scale, and signed H64 on A." },
+  rms:     { label: "RMS² · K32", color: "#31607f", bits: 3.375, kernel: "Two K32 MMAs, native K32 SFA/SFB, no global scale; RMS² weighting offline." },
+  rms_k64g:{ label: "RMS² · K64+G", color: "#4d55a5", bits: 3.25, kernel: "One K64 MMA, 8 native SFB values, folded tensor-global FP32 scale; RMS² weighting offline." },
+  rms_k32g:{ label: "RMS² · 2K32+G", color: "#6971b8", bits: 3.375, kernel: "Two K32 MMAs, 16 native SFB values, folded tensor-global FP32 scale; RMS² weighting offline." },
   gptq:    { label: "K64 GPTQ", color: "#5b4b91", bits: 3.375, kernel: "K64 Hessian/error compensation offline; standard LUT-B GEMM at runtime." },
   scale:   { label: "Scale+LM", color: "#b07c2b", bits: 3.375, kernel: "Offline UE8M0 scale search; physical B-scale descriptor is unchanged." },
   awq:     { label: "Folded AWQ", color: "#a04f2d", bits: 3.375, kernel: "Dense scales fold into RMSNorm/consumers; MiniMax uses an explicit routed gate-input scale." },
   lm:      { label: "Lloyd-Max", color: "#8a6a14", bits: 3.375, kernel: "Dense models: all text linear W3. MiniMax: only routed-expert w13/w2 weights W3; expert activations stay BF16." },
-  lm_a8:   { label: "Expert-W3 + input-A8", color: "#7c6b45", bits: 3.375, kernel: "MiniMax only: routed-expert w13/w2 weights W3; dispatched hidden is A8 before w13; intermediate entering w2 remains BF16; router/shared experts/attention stay native." },
   squeeze: { label: "SqueezeLLM", color: "#5d7f79", bits: 3.375, kernel: "Empirical-Fisher fitting offline; MiniMax uses a factorized-Fisher proxy." },
   nf3:     { label: "NF3", color: "#b55f5f", bits: 3.375, kernel: "Static zero-aware NF3 LUT; same storage, poor measured quality." },
   uniform: { label: "Uniform", color: "#a33d2f", bits: 3.375, kernel: "Uniform tile LUT; same storage, catastrophic measured quality." },
 };
 const W_DATA = {
   qwen: { label: "Qwen3-4B", values: {
-    8192:   { bf16:[9.447,0], a8:[9.508,.00559], h64:[11.504,.24232], gptq:[13.057,.34194], rms:[12.890,.38058], awq:[13.813,.38270], lm:[13.580,.41725], scale:[14.148,.44276], squeeze:[14.551,.48394], nf3:[30.295,1.35188], uniform:[91.387,2.26996] },
-    65536:  { bf16:[8.702,0], a8:[8.766,.00547], h64:[10.692,.21438], rms:[11.813,.32821], gptq:[12.451,.36228], scale:[12.930,.40136], awq:[12.764,.41050], lm:[12.701,.43991], squeeze:[13.231,.49338], nf3:[29.279,1.44343], uniform:[113.677,2.79120] },
-    131072: { bf16:[8.482,0], a8:[8.547,.00504], h64:[10.504,.28601], rms:[11.613,.36921], gptq:[12.471,.38442], scale:[12.845,.43388], awq:[12.666,.45302], lm:[12.703,.48603], squeeze:[13.332,.49994], nf3:[29.646,1.26669], uniform:[162.126,2.89007] },
+    8192:   { bf16:[9.447,0], a8:[9.508,.00559], h64:[11.504,.24232], h64_k64g:[11.664,.24494], h64_k32g:[11.500,.27527], gptq:[13.057,.34194], rms:[12.890,.38058], rms_k64g:[13.215,.40095], rms_k32g:[12.640,.36268], awq:[13.813,.38270], lm:[13.580,.41725], scale:[14.148,.44276], squeeze:[14.551,.48394], nf3:[30.295,1.35188], uniform:[91.387,2.26996] },
+    65536:  { bf16:[8.702,0], a8:[8.766,.00547], h64:[10.692,.21438], h64_k64g:[10.944,.23894], h64_k32g:[10.744,.25162], rms:[11.813,.32821], rms_k64g:[12.268,.39814], rms_k32g:[11.792,.34422], gptq:[12.451,.36228], scale:[12.930,.40136], awq:[12.764,.41050], lm:[12.701,.43991], squeeze:[13.231,.49338], nf3:[29.279,1.44343], uniform:[113.677,2.79120] },
+    131072: { bf16:[8.482,0], a8:[8.547,.00504], h64:[10.504,.28601], h64_k64g:[10.899,.26852], h64_k32g:[10.643,.25499], rms:[11.613,.36921], rms_k64g:[12.188,.43398], rms_k32g:[11.653,.39943], gptq:[12.471,.38442], scale:[12.845,.43388], awq:[12.666,.45302], lm:[12.703,.48603], squeeze:[13.332,.49994], nf3:[29.646,1.26669], uniform:[162.126,2.89007] },
   }},
   gemma: { label: "Gemma4-12B", values: {
-    8192:   { bf16:[6.479,0], a8:[6.527,.03256], h64:[7.924,.34988], gptq:[8.724,.47879], rms:[8.811,.51076], awq:[11.695,.77928], squeeze:[12.625,.87529], lm:[128.983,3.23424], scale:[156.667,3.49639], nf3:[4617.446,6.32933], uniform:[10701.342,7.45766] },
-    65536:  { bf16:[5.828,0], a8:[5.844,.00689], h64:[7.101,.34171], gptq:[7.886,.47953], rms:[7.824,.57771], awq:[10.917,.72734], squeeze:[11.146,1.06351], scale:[161.081,3.33806], lm:[168.717,3.55087], nf3:[4017.948,6.40578], uniform:[18271.539,7.89921] },
-    131072: { bf16:[5.771,0], a8:[5.786,.02114], h64:[7.034,.37273], gptq:[7.822,.50819], rms:[7.706,.55274], awq:[10.719,.83232], squeeze:[11.180,1.02137], scale:[193.054,3.54611], lm:[180.144,3.67195], nf3:[4358.944,6.57245], uniform:[19733.351,7.98959] },
+    8192:   { bf16:[6.479,0], a8:[6.527,.03256], h64:[7.924,.34988], h64_k64g:[8.021,.37371], h64_k32g:[7.938,.35687], gptq:[8.724,.47879], rms:[8.811,.51076], rms_k64g:[9.788,.55411], rms_k32g:[9.205,.48147], awq:[11.695,.77928], squeeze:[12.625,.87529], lm:[128.983,3.23424], scale:[156.667,3.49639], nf3:[4617.446,6.32933], uniform:[10701.342,7.45766] },
+    65536:  { bf16:[5.828,0], a8:[5.844,.00689], h64:[7.101,.34171], h64_k64g:[7.208,.44184], h64_k32g:[7.128,.34907], gptq:[7.886,.47953], rms:[7.824,.57771], rms_k64g:[8.515,.65772], rms_k32g:[8.256,.51175], awq:[10.917,.72734], squeeze:[11.146,1.06351], scale:[161.081,3.33806], lm:[168.717,3.55087], nf3:[4017.948,6.40578], uniform:[18271.539,7.89921] },
+    131072: { bf16:[5.771,0], a8:[5.786,.02114], h64:[7.034,.37273], h64_k64g:[7.169,.27815], h64_k32g:[7.067,.37087], gptq:[7.822,.50819], rms:[7.706,.55274], rms_k64g:[8.395,.65079], rms_k32g:[8.247,.61031], awq:[10.719,.83232], squeeze:[11.180,1.02137], scale:[193.054,3.54611], lm:[180.144,3.67195], nf3:[4358.944,6.57245], uniform:[19733.351,7.98959] },
   }},
   minimax: { label: "MiniMax-M3 routed", values: {
-    8192:   { bf16:[5.105,0], a8:[5.109,.05375], h64:[6.209,.27195], awq:[6.203,.32739], gptq:[6.555,.40402], squeeze:[7.642,.56452], rms:[7.591,.58726], lm:[8.611,.67041], lm_a8:[8.637,.69952], scale:[9.206,.74972], uniform:[617957.852,12.18981], nf3:[2104450.529,13.37978] },
-    65536:  { bf16:[4.306,0], a8:[4.293,.03330], h64:[5.299,.31414], gptq:[5.593,.37435], awq:[5.555,.41773], rms:[6.651,.54967], squeeze:[6.702,.55930], lm:[7.613,.66020], lm_a8:[7.618,.66528], scale:[8.028,.68932], uniform:[536027.492,12.22787], nf3:[2036118.895,13.51801] },
-    131072: { bf16:[4.124,0], a8:[4.115,.01756], h64:[5.076,.20916], gptq:[5.327,.24296], awq:[5.404,.29059], rms:[6.474,.42795], squeeze:[6.513,.43720], lm:[7.488,.58320], lm_a8:[7.456,.59566], scale:[7.835,.65367], uniform:[535932.314,12.15861], nf3:[2032820.392,13.30284] },
+    8192:   { bf16:[5.105,0], a8:[5.109,.05375], h64:[6.209,.27195], h64_k64g:[6.130,.23194], h64_k32g:[6.228,.28072], awq:[6.203,.32739], gptq:[6.555,.40402], squeeze:[7.642,.56452], rms:[7.591,.58726], rms_k64g:[5.983,.29160], rms_k32g:[5.978,.30157], lm:[8.611,.67041], scale:[9.206,.74972], uniform:[617957.852,12.18981], nf3:[2104450.529,13.37978] },
+    65536:  { bf16:[4.306,0], a8:[4.293,.03330], h64:[5.299,.31414], h64_k64g:[5.265,.31120], h64_k32g:[5.278,.31379], gptq:[5.593,.37435], awq:[5.555,.41773], rms:[6.651,.54967], rms_k64g:[5.225,.29669], rms_k32g:[5.197,.33921], squeeze:[6.702,.55930], lm:[7.613,.66020], scale:[8.028,.68932], uniform:[536027.492,12.22787], nf3:[2036118.895,13.51801] },
+    131072: { bf16:[4.124,0], a8:[4.115,.01756], h64:[5.076,.20916], h64_k64g:[5.078,.23976], h64_k32g:[5.032,.21195], gptq:[5.327,.24296], awq:[5.404,.29059], rms:[6.474,.42795], rms_k64g:[5.014,.17007], rms_k32g:[4.986,.18677], squeeze:[6.513,.43720], lm:[7.488,.58320], scale:[7.835,.65367], uniform:[535932.314,12.15861], nf3:[2032820.392,13.30284] },
   }},
 };
 const wState = { model: "qwen", ctx: 131072, method: "h64", view: "focus" };
