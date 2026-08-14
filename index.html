@@ -109,6 +109,12 @@
   }
   .seg button:hover:not(.on) { border-color: var(--faint); color: var(--ink-2); }
   .seg button.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 600; }
+  .method-select {
+    min-width: 250px; max-width: 100%; padding: 6px 34px 6px 10px;
+    border: 1px solid var(--line-2); border-radius: 6px; background: var(--surface);
+    color: var(--ink-2); font: 500 12.5px var(--sans); cursor: pointer;
+  }
+  .method-select:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
 
   /* two-panel figure */
   .duo { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
@@ -119,6 +125,7 @@
   .stat-s { font-size: 12px; color: var(--muted); margin-top: 3px; }
 
   #hxChart, #wxChart { width: 100%; display: block; overflow: visible; }
+  #wxChart { overflow: hidden; }
   #hxChart text, #wxChart text { font-family: var(--sans); }
   .chart-hint { font-size: 11px; color: var(--faint); text-align: right; margin-top: 2px; }
 
@@ -286,12 +293,13 @@
     </div>
     <p class="fig-sub">
       选择 model、context 与 method。“Global” methods 始终同时包含 native SFB block scale 和一个 folded
-      tensor-global FP32 scale。左侧是实测 PPL/KL₅₀，右侧是 payload 与 weight-only byte roofline。
+      tensor-global FP32 scale。所有实测 methods 都保留在 selector 与 full chart 中。左侧是实测 PPL/KL₅₀，
+      右侧是 payload 与 weight-only byte roofline。
     </p>
     <div class="controls">
       <div class="ctrl"><div class="ctrl-label">Model</div><div class="seg" id="wSegModel"></div></div>
       <div class="ctrl"><div class="ctrl-label">Context</div><div class="seg" id="wSegCtx"></div></div>
-      <div class="ctrl"><div class="ctrl-label">Method</div><div class="seg" id="wSegMethod"></div></div>
+      <div class="ctrl"><div class="ctrl-label">Method</div><select class="method-select" id="wMethodSelect" aria-label="Weight method"></select></div>
       <div class="ctrl"><div class="ctrl-label">KL chart view</div><div class="seg" id="wSegView"></div></div>
     </div>
     <div class="duo">
@@ -1167,10 +1175,6 @@ const W_METHODS = {
   nf3:     { label: "NF3", color: "#b55f5f", bits: 3.375, kernel: "Static zero-aware NF3 LUT; same storage, poor measured quality." },
   uniform: { label: "Uniform", color: "#a33d2f", bits: 3.375, kernel: "Uniform tile LUT; same storage, catastrophic measured quality." },
 };
-const W_SELECTOR_METHODS = [
-  "bf16", "a8", "h64_k64g", "h64_k32g", "rms_k64g", "rms_k32g", "lm",
-];
-const W_CHART_METHODS = [...W_SELECTOR_METHODS, "nf3", "uniform"];
 const W_DATA = {
   qwen: { label: "Qwen3-4B", values: {
     8192:   { bf16:[9.447,0], a8:[9.508,.00559], h64:[11.504,.24232], h64_k64g:[11.664,.24494], h64_k32g:[11.500,.27527], gptq:[13.057,.34194], rms:[12.890,.38058], rms_k64g:[13.215,.40095], rms_k32g:[12.640,.36268], awq:[13.813,.38270], lm:[13.580,.41725], scale:[14.148,.44276], squeeze:[14.551,.48394], nf3:[30.295,1.35188], uniform:[91.387,2.26996] },
@@ -1188,7 +1192,7 @@ const W_DATA = {
     131072: { bf16:[4.124,0], a8:[4.115,.01756], h64:[5.076,.20916], h64_k64g:[5.078,.23976], h64_k32g:[5.032,.21195], gptq:[5.327,.24296], awq:[5.404,.29059], rms:[6.474,.42795], rms_k64g:[5.014,.17007], rms_k32g:[4.986,.18677], squeeze:[6.513,.43720], lm:[7.488,.58320], scale:[7.835,.65367], uniform:[535932.314,12.15861], nf3:[2032820.392,13.30284] },
   }},
 };
-const wState = { model: "qwen", ctx: 131072, method: "h64_k32g", view: "focus" };
+const wState = { model: "qwen", ctx: 131072, method: "h64_k32g", view: "all" };
 
 /* ============================================================
    Data — Qwen3-4B-Thinking-2507
@@ -1271,6 +1275,19 @@ function seg(containerId, items, current, onPick) {
   });
 }
 
+function selectMenu(containerId, items, current, onPick) {
+  const c = $(containerId);
+  c.innerHTML = "";
+  items.forEach(([key, label]) => {
+    const option = document.createElement("option");
+    option.value = key;
+    option.textContent = label;
+    c.appendChild(option);
+  });
+  c.value = current;
+  c.onchange = () => onPick(c.value);
+}
+
 function weightRows() {
   const values = W_DATA[wState.model].values[wState.ctx];
   return Object.entries(values).map(([key, pair]) => ({
@@ -1281,13 +1298,13 @@ function weightRows() {
 function renderWeightChart() {
   const svg = $("wxChart");
   svg.innerHTML = "";
-  const allRows = weightRows().filter(r => W_CHART_METHODS.includes(r.key));
+  const allRows = weightRows();
   const focusMax = 1.0;
   const rows = wState.view === "focus"
     ? allRows.filter(r => r.kl <= focusMax)
     : allRows;
   const width = Math.max(300, svg.parentElement.clientWidth - 36);
-  const H = wState.view === "all" ? 206 : 166, mL = 14, mR = 16, mT = 42, mB = 32;
+  const H = wState.view === "all" ? 290 : 220, mL = 14, mR = 16, mT = 42, mB = 32;
   const plotBot = H - mB, innerW = width - mL - mR;
   const hi = wState.view === "focus"
     ? focusMax
@@ -1303,9 +1320,9 @@ function renderWeightChart() {
   });
   $("wxChartHint").textContent = wState.view === "focus"
     ? "Linear KL\u2085\u2080 axis: 0\u20131 quality range; NF3/uniform outliers are hidden"
-    : "Linear KL\u2085\u2080 axis: core methods + NF3/uniform outliers; lower is better";
+    : "Linear KL\u2085\u2080 axis: every measured method; lower is better";
   const dots = rows.map(r => ({ r, x:X(r.kl), lane:0 })).sort((a,b) => a.x-b.x);
-  const laneCount = Math.min(dots.length, wState.view === "all" ? 9 : 5);
+  const laneCount = Math.min(dots.length, wState.view === "all" ? 13 : 9);
   const laneTop = mT + 10, laneBottom = plotBot - 10;
   const laneY = Array.from({length:laneCount}, (_,i) =>
     laneCount === 1 ? (laneTop+laneBottom)/2 : laneTop + i*(laneBottom-laneTop)/(laneCount-1));
@@ -1380,12 +1397,12 @@ function renderWeight() {
   seg("wSegCtx", [[8192,"8K"],[65536,"64K"],[131072,"128K"]], wState.ctx, k => {
     wState.ctx=+k; renderWeight();
   });
-  seg("wSegMethod", weightRows().filter(r => W_SELECTOR_METHODS.includes(r.key)).map(r => [r.key,r.label]), wState.method, k => {
+  selectMenu("wMethodSelect", weightRows().map(r => [r.key,r.label]), wState.method, k => {
     wState.method=k;
     if (values[k][1] > 1) wState.view="all";
     renderWeight();
   });
-  seg("wSegView", [["focus","Quality range (KL\u22641)"],["all","Core + outliers"]], wState.view, k => {
+  seg("wSegView", [["focus","Quality range (KL\u22641)"],["all","All methods"]], wState.view, k => {
     wState.view=k;
     if (k === "focus" && values[wState.method][1] > 1) wState.method = values.h64 ? "h64" : Object.keys(values)[0];
     renderWeight();
