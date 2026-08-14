@@ -1168,8 +1168,9 @@ const W_METHODS = {
   uniform: { label: "Uniform", color: "#a33d2f", bits: 3.375, kernel: "Uniform tile LUT; same storage, catastrophic measured quality." },
 };
 const W_SELECTOR_METHODS = [
-  "bf16", "a8", "h64_k64g", "h64_k32g", "rms_k64g", "rms_k32g", "gptq", "awq", "lm",
+  "bf16", "a8", "h64_k64g", "h64_k32g", "rms_k64g", "rms_k32g", "lm",
 ];
+const W_CHART_METHODS = [...W_SELECTOR_METHODS, "nf3", "uniform"];
 const W_DATA = {
   qwen: { label: "Qwen3-4B", values: {
     8192:   { bf16:[9.447,0], a8:[9.508,.00559], h64:[11.504,.24232], h64_k64g:[11.664,.24494], h64_k32g:[11.500,.27527], gptq:[13.057,.34194], rms:[12.890,.38058], rms_k64g:[13.215,.40095], rms_k32g:[12.640,.36268], awq:[13.813,.38270], lm:[13.580,.41725], scale:[14.148,.44276], squeeze:[14.551,.48394], nf3:[30.295,1.35188], uniform:[91.387,2.26996] },
@@ -1280,13 +1281,13 @@ function weightRows() {
 function renderWeightChart() {
   const svg = $("wxChart");
   svg.innerHTML = "";
-  const allRows = weightRows();
+  const allRows = weightRows().filter(r => W_CHART_METHODS.includes(r.key));
   const focusMax = 1.0;
   const rows = wState.view === "focus"
     ? allRows.filter(r => r.kl <= focusMax)
     : allRows;
   const width = Math.max(300, svg.parentElement.clientWidth - 36);
-  const H = 166, mL = 14, mR = 16, mT = 42, mB = 32;
+  const H = wState.view === "all" ? 206 : 166, mL = 14, mR = 16, mT = 42, mB = 32;
   const plotBot = H - mB, innerW = width - mL - mR;
   const hi = wState.view === "focus"
     ? focusMax
@@ -1302,17 +1303,24 @@ function renderWeightChart() {
   });
   $("wxChartHint").textContent = wState.view === "focus"
     ? "Linear KL\u2085\u2080 axis: 0\u20131 quality range; NF3/uniform outliers are hidden"
-    : "Linear KL\u2085\u2080 axis: full range; lower is better";
-  const cy = mT + (plotBot - mT) / 2;
-  const dots = rows.map(r => ({ r, x:X(r.kl), lvl:0 })).sort((a,b) => a.x-b.x);
-  const placed = [];
+    : "Linear KL\u2085\u2080 axis: core methods + NF3/uniform outliers; lower is better";
+  const dots = rows.map(r => ({ r, x:X(r.kl), lane:0 })).sort((a,b) => a.x-b.x);
+  const laneCount = Math.min(dots.length, wState.view === "all" ? 9 : 5);
+  const laneTop = mT + 10, laneBottom = plotBot - 10;
+  const laneY = Array.from({length:laneCount}, (_,i) =>
+    laneCount === 1 ? (laneTop+laneBottom)/2 : laneTop + i*(laneBottom-laneTop)/(laneCount-1));
+  const laneLastX = Array(laneCount).fill(-Infinity);
   dots.forEach(d => {
-    while (placed.some(q => q.lvl === d.lvl && Math.abs(q.x-d.x) < 15)) d.lvl++;
-    placed.push(d);
+    let bestLane = 0, bestDistance = -1;
+    laneLastX.forEach((lastX, lane) => {
+      const distance = d.x-lastX;
+      if (distance > bestDistance) { bestDistance=distance; bestLane=lane; }
+    });
+    d.lane=bestLane;
+    laneLastX[bestLane]=d.x;
   });
   dots.forEach(d => {
-    const off = d.lvl === 0 ? 0 : (d.lvl % 2 ? -1 : 1) * Math.ceil(d.lvl / 2) * 15;
-    const y = cy + off, selected = d.r.key === wState.method;
+    const y = laneY[d.lane], selected = d.r.key === wState.method;
     const c = el("circle", {
       cx:d.x, cy:y, r:selected ? 9 : 6.5, fill:d.r.color,
       stroke:"#fcfaf4", "stroke-width":selected ? 2.5 : 1.5, style:"cursor:pointer",
@@ -1377,7 +1385,7 @@ function renderWeight() {
     if (values[k][1] > 1) wState.view="all";
     renderWeight();
   });
-  seg("wSegView", [["focus","Quality range (KL\u22641)"],["all","All methods"]], wState.view, k => {
+  seg("wSegView", [["focus","Quality range (KL\u22641)"],["all","Core + outliers"]], wState.view, k => {
     wState.view=k;
     if (k === "focus" && values[wState.method][1] > 1) wState.method = values.h64 ? "h64" : Object.keys(values)[0];
     renderWeight();
