@@ -122,13 +122,6 @@
   #hxChart, #wxChart { width: 100%; display: block; overflow: visible; }
   #wxChart { overflow: hidden; }
   #hxChart text, #wxChart text { font-family: var(--sans); }
-  #wxChart .pop { transform-box: fill-box; transform-origin: center; animation: pop .5s cubic-bezier(.2,.7,.3,1.3) both; }
-  #wxChart .fade { animation: fade .9s ease both; }
-  @keyframes pop { from { transform: scale(0); } to { transform: none; } }
-  @keyframes fade { from { opacity: 0; } }
-  @media (prefers-reduced-motion: reduce) {
-    #wxChart .pop, #wxChart .fade { animation: none; }
-  }
   .chart-hint { font-size: 11px; color: var(--faint); text-align: right; margin-top: 2px; }
 
   #tip {
@@ -291,12 +284,12 @@
   <section class="fig-card" id="weight-explorer" aria-label="Weight 精度与存储交互对比">
     <div class="fig-head">
       <span class="fig-tag">图 1 · Interactive Weight</span>
-      <span class="fig-title">相同的 3-bit Payload，也可能产生完全不同的 Accuracy</span>
+      <span class="fig-title">W3 methods：K64/two-K32 schedules 与 paired scales</span>
     </div>
     <p class="fig-sub">
       选择 model、context 与 method。“Global” methods 始终同时包含 native SFB block scale 和一个 folded
-      tensor-global FP32 scale。所有实测 methods 都保留。Lieflat F8 Plumb Scatter 用 x 表示 KL₅₀、y 表示
-      PPL；右侧继续显示 payload、算法与 kernel 细节。
+      tensor-global FP32 scale。所有实测 methods 都保留在 selector 与 full chart 中。左侧是实测 PPL/KL₅₀，
+      右侧是 payload 与 weight-only byte roofline。
     </p>
     <div class="controls">
       <div class="ctrl"><div class="ctrl-label">Model</div><div class="seg" id="wSegModel"></div></div>
@@ -1305,152 +1298,64 @@ function renderWeightChart() {
   const rows = wState.view === "focus"
     ? allRows.filter(r => r.kl <= focusMax)
     : allRows;
-  /*
-   * Lieflat candidate audit:
-   * F8 Plumb Scatter preserves both measured dimensions (KL50 and PPL).
-   * F5 Tick Rows ranks one metric but discards the second; L2 Dot Cascade
-   * requires countable units and would invent records. F8 is the honest fit.
-   */
-  const W=400,H=320,X0=54,X1=374,full=wState.view==="all",top=full?34:42,base=full?158:258;
-  const mono=["#1C1C1A","#55554F","#6A6963","#8F8E88"];
-  const xMax=wState.view==="focus" ? focusMax : Math.max(...rows.map(r=>r.kl))*1.04 || 1;
-  const pplMin=Math.min(...rows.map(r=>r.ppl))*.98;
-  const pplMax=Math.max(...rows.map(r=>r.ppl))*1.02;
-  const logAxes=full;
-  const xNorm=v=>logAxes ? Math.log1p(v)/Math.log1p(xMax) : v/xMax;
-  const yNorm=v=>{
-    if(!logAxes || pplMax/pplMin<3) return (v-pplMin)/(pplMax-pplMin || 1);
-    return (Math.log(v)-Math.log(pplMin))/(Math.log(pplMax)-Math.log(pplMin));
-  };
-  const X=v=>X0+xNorm(v)*(X1-X0);
-  const Y=v=>base-yNorm(v)*(base-top);
-  const fmt=v=>v>=1e6?(v/1e6).toFixed(1)+"M":v>=1e3?(v/1e3).toFixed(1)+"K":v>=100?v.toFixed(0):v.toFixed(1);
-  svg.setAttribute("viewBox",`0 0 ${W} ${H}`);
-  svg.style.height="320px";
-
-  // F8 barcode floor and plumb-scatter guides.
-  for(let g=0;g<=20;g++){
-    const x=X0+g/20*(X1-X0);
-    el("line",{x1:x,y1:base,x2:x,y2:base-(g%5===0?7:4),stroke:"#CFCEC7","stroke-width":.6,
-      class:"fade",style:`animation-delay:${g*.01}s`},svg);
-  }
-  el("line",{x1:X0-6,y1:base,x2:X1+6,y2:base,stroke:"#DEDDD6","stroke-width":.8,class:"fade"},svg);
-  [0,.25,.5,.75,1].forEach((u,i)=>{
-    const value=logAxes ? Math.expm1(Math.log1p(xMax)*u) : xMax*u;
-    const x=X(value);
-    if(i>0&&i<4)el("line",{x1:x,y1:top,x2:x,y2:base,stroke:"#E6E4DE","stroke-width":.55,
-      "stroke-dasharray":"2 4",class:"fade"},svg);
-    const t=el("text",{x,y:base+16,"text-anchor":"middle","font-size":9,fill:"#B0AFA9",
-      "font-weight":600,class:"fade"},svg);
-    t.textContent=value===0?"0":value<.1?value.toFixed(3):value.toFixed(2);
+  const width = Math.max(300, svg.parentElement.clientWidth - 36);
+  const H = wState.view === "all" ? 290 : 220, mL = 14, mR = 16, mT = 42, mB = 32;
+  const plotBot = H - mB, innerW = width - mL - mR;
+  const hi = wState.view === "focus"
+    ? focusMax
+    : Math.max(...allRows.map(r => r.kl)) * 1.04 || 1;
+  const X = (v) => mL + (v / hi) * innerW;
+  svg.setAttribute("viewBox", "0 0 " + width + " " + H);
+  svg.style.height = H + "px";
+  [0, hi / 4, hi / 2, 3 * hi / 4, hi].forEach(v => {
+    const x = X(v);
+    el("line", { x1:x, y1:mT-4, x2:x, y2:plotBot, stroke:"#ece7d6", "stroke-width":1 }, svg);
+    const t = el("text", { x, y:plotBot+16, "text-anchor":"middle", "font-size":10, fill:"#97927f", "font-weight":600 }, svg);
+    t.textContent = v === 0 ? "0" : v < .1 ? v.toFixed(3) : v.toFixed(2);
   });
-  [0,.25,.5,.75,1].forEach((u,i)=>{
-    const value=logAxes&&pplMax/pplMin>=3
-      ? Math.exp(Math.log(pplMin)+(Math.log(pplMax)-Math.log(pplMin))*u)
-      : pplMin+(pplMax-pplMin)*u;
-    const y=Y(value);
-    el("line",{x1:X0,y1:y,x2:X1,y2:y,stroke:i===0?"#DEDDD6":"#E6E4DE","stroke-width":.55,
-      "stroke-dasharray":i===0?"":"2 4",class:"fade"},svg);
-    const t=el("text",{x:X0-8,y:y+2.5,"text-anchor":"end","font-size":9,fill:"#B0AFA9",
-      "font-weight":600,class:"fade"},svg);
-    t.textContent=fmt(value);
+  $("wxChartHint").textContent = wState.view === "focus"
+    ? "Linear KL\u2085\u2080 axis: 0\u20131 quality range; NF3/uniform outliers are hidden"
+    : "Linear KL\u2085\u2080 axis: every measured method; lower is better";
+  const dots = rows.map(r => ({ r, x:X(r.kl), lane:0 })).sort((a,b) => a.x-b.x);
+  const laneCount = Math.min(dots.length, wState.view === "all" ? 13 : 9);
+  const laneTop = mT + 10, laneBottom = plotBot - 10;
+  const laneY = Array.from({length:laneCount}, (_,i) =>
+    laneCount === 1 ? (laneTop+laneBottom)/2 : laneTop + i*(laneBottom-laneTop)/(laneCount-1));
+  const laneLastX = Array(laneCount).fill(-Infinity);
+  dots.forEach(d => {
+    let bestLane = 0, bestDistance = -1;
+    laneLastX.forEach((lastX, lane) => {
+      const distance = d.x-lastX;
+      if (distance > bestDistance) { bestDistance=distance; bestLane=lane; }
+    });
+    d.lane=bestLane;
+    laneLastX[bestLane]=d.x;
   });
-
-  const worst=rows.reduce((a,b)=>b.ppl>a.ppl?b:a);
-  rows.forEach((r,i)=>{
-    const x=X(r.kl),y=Y(r.ppl),selected=r.key===wState.method,hero=selected||r.key===worst.key;
-    el("line",{x1:x,y1:base,x2:x,y2:y,stroke:"#B0AFA9","stroke-width":.55,opacity:.65,
-      class:"fade",style:`animation-delay:${.18+i*.045}s`},svg);
+  dots.forEach(d => {
+    const y = laneY[d.lane], selected = d.r.key === wState.method;
     const c = el("circle", {
-      cx:x,cy:y,r:selected?6.4:hero?4.6:3,fill:selected?"#1C1C1A":mono[i%mono.length],
-      stroke:"#fcfaf4","stroke-width":selected?2.2:1,style:"cursor:pointer",
-      class:"pop","data-method":r.key,
-      "data-delay":i,
+      cx:d.x, cy:y, r:selected ? 9 : 6.5, fill:d.r.color,
+      stroke:"#fcfaf4", "stroke-width":selected ? 2.5 : 1.5, style:"cursor:pointer",
     }, svg);
-    c.style.animationDelay=`${.22+i*.045}s`;
     c.addEventListener("mousemove", ev => showTip(
-      '<div class="t-title">'+r.full+'</div>'+
-      '<div class="t-row"><span>KL\u2085\u2080</span><b>'+r.kl.toFixed(5)+'</b></div>'+
-      '<div class="t-row"><span>PPL</span><b>'+r.ppl.toFixed(3)+'</b></div>'+
-      '<div class="t-row"><span>W payload</span><b>'+r.bits+' bit</b></div>',
+      '<div class="t-title">'+d.r.label+'</div>'+
+      '<div class="t-row"><span>KL\u2085\u2080</span><b>'+d.r.kl.toFixed(5)+'</b></div>'+
+      '<div class="t-row"><span>PPL</span><b>'+d.r.ppl.toFixed(3)+'</b></div>'+
+      '<div class="t-row"><span>W payload</span><b>'+d.r.bits+' bit</b></div>',
       ev.clientX, ev.clientY));
     c.addEventListener("mouseleave", hideTip);
-    c.addEventListener("click", () => { wState.method=r.key; hideTip(); renderWeight(); });
+    c.addEventListener("click", () => { wState.method=d.r.key; hideTip(); renderWeight(); });
     if (selected) {
-      el("circle",{cx:x,cy:y,r:10,fill:"none",stroke:"#1C1C1A","stroke-width":1.2,
-        "stroke-dasharray":"2.5 3"},svg);
-    }
-    if(r.key===worst.key||(!full&&selected)){
-      const anchor=x>X1-90?"end":x<X0+90?"start":"middle";
-      const lx=anchor==="end"?x-7:anchor==="start"?x+7:x;
-      const ly=y<top+22?y+17:y-9;
-      const label=el("text",{x:lx,y:ly,"text-anchor":anchor,"font-size":10,"font-weight":800,
-        fill:selected?"#1C1C1A":"#6A6963",
-        style:"paint-order:stroke;stroke:#fcfaf4;stroke-width:3px",
-        class:"fade"},svg);
-      label.textContent=selected?`${r.label} · ${r.kl.toFixed(3)} / ${fmt(r.ppl)}`:r.label;
+      el("circle", { cx:d.x, cy:y, r:13, fill:"none", stroke:d.r.color, "stroke-width":1.6, "stroke-dasharray":"2.5 3" }, svg);
+      const labelText = d.r.label+" "+(d.r.kl < .1 ? d.r.kl.toFixed(4) : d.r.kl.toFixed(3));
+      const labelW = Math.min(width-mL-mR, Math.max(88, labelText.length*6.3+16));
+      const tx = Math.min(Math.max(d.x, mL+labelW/2), width-mR-labelW/2);
+      el("line", { x1:tx, y1:25, x2:d.x, y2:y-13, stroke:d.r.color, "stroke-width":1, "stroke-dasharray":"2 3", opacity:.65 }, svg);
+      el("rect", { x:tx-labelW/2, y:4, width:labelW, height:22, rx:6, fill:"#fcfaf4", stroke:d.r.color, "stroke-width":1 }, svg);
+      const label = el("text", { x:tx, y:19, "text-anchor":"middle", "font-size":11, "font-weight":700, fill:d.r.color }, svg);
+      label.textContent = labelText;
     }
   });
-  if(full){
-    // Honest magnifier for the dense quality region; the main panel still contains every method.
-    const bf16=allRows.find(r=>r.key==="bf16");
-    const core=allRows.filter(r=>r.kl<=1&&r.ppl<=bf16.ppl*2);
-    const IX0=54,IX1=374,IT=205,IB=279;
-    const cMin=Math.min(...core.map(r=>r.ppl))*.99;
-    const cMax=Math.max(...core.map(r=>r.ppl))*1.01;
-    const iX=v=>IX0+(v/focusMax)*(IX1-IX0);
-    const iY=v=>IB-(v-cMin)/(cMax-cMin||1)*(IB-IT);
-    el("rect",{x:IX0-8,y:IT-23,width:IX1-IX0+16,height:IB-IT+31,rx:8,fill:"#fcfaf4",
-      stroke:"#DEDDD6","stroke-width":.8},svg);
-    const insetTitle=el("text",{x:IX0,y:IT-10,"font-size":9,"font-weight":800,fill:"#6A6963",
-      "letter-spacing":".08em"},svg);
-    insetTitle.textContent="QUALITY WINDOW \u00b7 LINEAR \u00b7 KL\u2085\u2080 \u2264 1 \u00b7 PPL \u2264 2\u00d7 BF16";
-    el("line",{x1:IX0,y1:IB,x2:IX1,y2:IB,stroke:"#DEDDD6","stroke-width":.8},svg);
-    [0,.5,1].forEach(v=>{
-      const x=iX(v);
-      el("line",{x1:x,y1:IT,x2:x,y2:IB,stroke:"#E6E4DE","stroke-width":.55,
-        "stroke-dasharray":"2 4"},svg);
-      const t=el("text",{x,y:IB+12,"text-anchor":"middle","font-size":9,fill:"#B0AFA9",
-        "font-weight":600},svg);
-      t.textContent=v.toFixed(v===0?0:1);
-    });
-    [cMin,cMax].forEach(v=>{
-      const y=iY(v);
-      const t=el("text",{x:IX0-6,y:y+2,"text-anchor":"end","font-size":9,fill:"#B0AFA9",
-        "font-weight":600},svg);
-      t.textContent=fmt(v);
-    });
-    core.forEach((r,i)=>{
-      const x=iX(r.kl),y=iY(r.ppl),selected=r.key===wState.method;
-      el("line",{x1:x,y1:IB,x2:x,y2:y,stroke:"#B0AFA9","stroke-width":.5,opacity:.7},svg);
-      const dot=el("circle",{cx:x,cy:y,r:selected?5.2:2.8,fill:selected?"#1C1C1A":mono[i%mono.length],
-        stroke:"#fcfaf4","stroke-width":selected?1.8:.8,style:"cursor:pointer"},svg);
-      dot.addEventListener("mousemove",ev=>showTip(
-        '<div class="t-title">'+r.full+'</div>'+
-        '<div class="t-row"><span>KL\u2085\u2080</span><b>'+r.kl.toFixed(5)+'</b></div>'+
-        '<div class="t-row"><span>PPL</span><b>'+r.ppl.toFixed(3)+'</b></div>',
-        ev.clientX,ev.clientY));
-      dot.addEventListener("mouseleave",hideTip);
-      dot.addEventListener("click",()=>{wState.method=r.key;hideTip();renderWeight();});
-      if(selected){
-        const label=el("text",{x:Math.min(x+7,IX1),y:y<IT+12?y+12:y-7,
-          "text-anchor":x>IX1-90?"end":"start","font-size":9,"font-weight":800,fill:"#1C1C1A",
-          style:"paint-order:stroke;stroke:#fcfaf4;stroke-width:3px"},svg);
-        label.textContent=`${r.label} \u00b7 ${r.kl.toFixed(3)} / ${fmt(r.ppl)}`;
-      }
-    });
-  }
-  const yTitle=el("text",{x:20,y:top+2,"font-size":9,"font-weight":600,fill:"#8F8E88",
-    transform:`rotate(-90 20 ${top+2})`,"text-anchor":"end","letter-spacing":".08em",class:"fade"},svg);
-  yTitle.textContent="PPL \u2191 WORSE";
-  const footer=el("text",{x:W/2,y:306,"font-size":8.5,"font-weight":600,fill:"#B0AFA9",
-    "text-anchor":"middle","letter-spacing":".08em",class:"fade"},svg);
-  footer.textContent=logAxes
-    ?"F8 PLUMB SCATTER \u00b7 LOG FULL RANGE + LINEAR QUALITY WINDOW"
-    :"F8 PLUMB SCATTER \u00b7 X = KL\u2085\u2080 \u00b7 Y = PPL \u00b7 LOWER-LEFT IS BETTER";
-  $("wxChartHint").textContent=logAxes
-    ?"Lieflat F8 Plumb Scatter \u00b7 every method in the log overview; core methods repeated in a linear magnifier"
-    :"Lieflat F8 Plumb Scatter \u00b7 linear quality range \u00b7 KL\u2085\u2080 \u22641";
 }
 
 function payloadRow(host, name, bits, color) {
