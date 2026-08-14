@@ -145,6 +145,9 @@
   }
   .speed-caption { font-size: 13.5px; color: var(--ink-2); margin-top: 14px; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 10px 14px; line-height: 1.75; font-family: var(--serif); }
   .speed-caption b { font-family: var(--mono); font-size: .92em; font-weight: 600; color: var(--accent); }
+  #wxKernel .method-full { font-family: var(--serif); font-size: 14px; font-weight: 700; color: var(--ink); }
+  #wxKernel .method-line { margin-top: 6px; }
+  #wxKernel .method-line strong { color: var(--accent); }
   .payload-row { margin: 9px 0 12px; }
   .payload-top { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; margin-bottom: 4px; }
   .payload-name { font-size: 12px; font-weight: 650; color: var(--ink-2); }
@@ -1151,21 +1154,21 @@ function hideTip() { tip.style.display = "none"; }
    W3 rows explicitly identify K64/two-K32 schedules and paired-scale payload.
    ============================================================ */
 const W_METHODS = {
-  bf16:    { label: "BF16", color: "#4a463c", bits: 16, kernel: "Dense BF16 GEMM; no LUT-B." },
-  a8:      { label: "A8-only", color: "#6e6a5c", bits: 16, kernel: "BF16 W; E4M3 + UE8M0 K32 QDQ on A." },
-  h64:     { label: "H64 · K32", color: "#3e6b5f", bits: 3.375, kernel: "Two K32 MMAs, native K32 SFA/SFB, no global scale; matching signed H64 on A." },
-  h64_k64g:{ label: "H64 · K64+G", color: "#2f7f6c", bits: 3.25, kernel: "One K64 MMA, 8 native SFB values, folded tensor-global FP32 scale, and signed H64 on A." },
-  h64_k32g:{ label: "Hadamard64 + GPTQ + 2K32 + Global Scale", color: "#4d8f68", bits: 3.375, kernel: "Two K32 MMAs, 16 native SFB values, folded tensor-global FP32 scale, and signed H64 on A." },
-  rms:     { label: "RMS² · K32", color: "#31607f", bits: 3.375, kernel: "Two K32 MMAs, native K32 SFA/SFB, no global scale; RMS² weighting offline." },
-  rms_k64g:{ label: "RMS² · K64+G", color: "#4d55a5", bits: 3.25, kernel: "One K64 MMA, 8 native SFB values, folded tensor-global FP32 scale; RMS² weighting offline." },
-  rms_k32g:{ label: "RMS² · 2K32+G", color: "#6971b8", bits: 3.375, kernel: "Two K32 MMAs, 16 native SFB values, folded tensor-global FP32 scale; RMS² weighting offline." },
-  gptq:    { label: "K64 GPTQ", color: "#5b4b91", bits: 3.375, kernel: "K64 Hessian/error compensation offline; standard LUT-B GEMM at runtime." },
-  scale:   { label: "Scale+LM", color: "#b07c2b", bits: 3.375, kernel: "Offline UE8M0 scale search; physical B-scale descriptor is unchanged." },
-  awq:     { label: "Folded AWQ", color: "#a04f2d", bits: 3.375, kernel: "Dense scales fold into RMSNorm/consumers; MiniMax uses an explicit routed gate-input scale." },
-  lm:      { label: "Lloyd-Max", color: "#8a6a14", bits: 3.375, kernel: "Dense models: all text linear W3. MiniMax: only routed-expert w13/w2 weights W3; expert activations stay BF16." },
-  squeeze: { label: "SqueezeLLM", color: "#5d7f79", bits: 3.375, kernel: "Empirical-Fisher fitting offline; MiniMax uses a factorized-Fisher proxy." },
-  nf3:     { label: "NF3", color: "#b55f5f", bits: 3.375, kernel: "Static zero-aware NF3 LUT; same storage, poor measured quality." },
-  uniform: { label: "Uniform", color: "#a33d2f", bits: 3.375, kernel: "Uniform tile LUT; same storage, catastrophic measured quality." },
+  bf16:    { label: "BF16", full: "BF16 Weight + BF16 Activation Baseline", color: "#4a463c", bits: 16, about: "No weight or activation quantization; this is the native accuracy reference.", kernel: "Dense BF16 GEMM with no LUT, SFB, rotation, or global quantization scale." },
+  a8:      { label: "A8-only", full: "BF16 Weight + MXFP8 Activation-Only QDQ", color: "#6e6a5c", bits: 16, about: "Weights remain BF16; activations are quantize-dequantized to E4M3 with one UE8M0 scale per K32 block.", kernel: "Dense BF16 weight GEMM after online A quantization; no LUT-B weight path." },
+  h64:     { label: "H64 · K32", full: "Hadamard64 + GPTQ + 2K32", color: "#3e6b5f", bits: 3.375, about: "A fixed random signed Hadamard64 rotation spreads weight outliers, then K64 block-diagonal LUT-GPTQ applies activation-Hessian error compensation.", kernel: "E4M3/UE8M0 A8, two K32 LUT-B MMAs, 16 native SFB values per K64×N8 tile, no global scale, and the matching signed H64 transform on A." },
+  h64_k64g:{ label: "H64 · K64+G", full: "Hadamard64 + GPTQ + K64 + Global Scale", color: "#2f7f6c", bits: 3.25, global: true, about: "The same signed Hadamard64 and K64 block-diagonal LUT-GPTQ recipe, evaluated with the coarser one-K64 scale schedule.", kernel: "E4M3/UE8M0 A8, one K64 LUT-B MMA, 8 native SFB values per tile, one folded tensor-global FP32 scale, and signed H64 on A." },
+  h64_k32g:{ label: "H64 · 2K32+G", full: "Hadamard64 + GPTQ + 2K32 + Global Scale", color: "#4d8f68", bits: 3.375, global: true, about: "Signed Hadamard64 first spreads outliers; K64 block-diagonal LUT-GPTQ then compensates quantization error using the calibrated activation Hessian.", kernel: "E4M3/UE8M0 A8, two K32 LUT-B MMAs, 16 native SFB values per tile, one folded tensor-global FP32 scale, and signed H64 on A." },
+  rms:     { label: "RMS² · K32", full: "Activation-RMS²-Weighted Lloyd–Max + 2K32", color: "#31607f", bits: 3.375, about: "Tile-local Lloyd–Max fitting weights each reconstruction error by the calibrated squared RMS of its activation channel.", kernel: "E4M3/UE8M0 A8 and two K32 LUT-B MMAs with 16 native SFB values per tile; all RMS² weighting is offline and no global scale is used." },
+  rms_k64g:{ label: "RMS² · K64+G", full: "Activation-RMS²-Weighted Lloyd–Max + K64 + Global Scale", color: "#4d55a5", bits: 3.25, global: true, about: "The RMS²-weighted Lloyd–Max codebook is fitted offline, then paired with one-K64 native block scaling and a tensor-global scale.", kernel: "E4M3/UE8M0 A8, one K64 LUT-B MMA, 8 native SFB values per tile, and one folded tensor-global FP32 scale." },
+  rms_k32g:{ label: "RMS² · 2K32+G", full: "Activation-RMS²-Weighted Lloyd–Max + 2K32 + Global Scale", color: "#6971b8", bits: 3.375, global: true, about: "The same offline RMS²-weighted Lloyd–Max fitting, with finer K32-local scaling plus one tensor-global scale.", kernel: "E4M3/UE8M0 A8, two K32 LUT-B MMAs, 16 native SFB values per tile, and one folded tensor-global FP32 scale." },
+  gptq:    { label: "K64 GPTQ", full: "K64 Block-Diagonal LUT-GPTQ W3A8", color: "#5b4b91", bits: 3.375, about: "Activation-Hessian column ordering and error compensation are performed offline while the output remains scalar 3-bit indices into eight E4M3 centroids.", kernel: "E4M3/UE8M0 A8 with two K32 LUT-B MMAs and 16 native SFB values per K64×N8 tile; no runtime Hessian work." },
+  scale:   { label: "Scale+LM", full: "UE8M0 Scale-Search + Lloyd–Max W3A8", color: "#b07c2b", bits: 3.375, about: "Offline fitting alternates hardware-representable UE8M0 B-scale selection with Lloyd–Max updates of the eight E4M3 centroids.", kernel: "E4M3/UE8M0 A8 with two K32 LUT-B MMAs and the same 16-value native SFB descriptor; no extra runtime search." },
+  awq:     { label: "Folded AWQ", full: "Folded Activation-Aware Weight Quantization + Lloyd–Max W3A8", color: "#a04f2d", bits: 3.375, about: "Activation-aware channel balancing is calibrated first, folded into supported RMSNorm/consumer weights, and followed by tile-local Lloyd–Max fitting.", kernel: "Two K32 LUT-B MMAs with 16 native SFB values; supported dense folds add no runtime multiply, while MiniMax uses an explicit routed expert-input scale." },
+  lm:      { label: "Lloyd-Max", full: "Tile-Local Lloyd–Max W3A8", color: "#8a6a14", bits: 3.375, about: "Each K64×N8 weight tile fits eight nonuniform centroids by nearest-center assignment and centroid updates, then rounds the final codebook to E4M3.", kernel: "E4M3/UE8M0 A8 with two K32 LUT-B MMAs and 16 native SFB values; MiniMax quantizes routed-expert w13/w2 weights only." },
+  squeeze: { label: "SqueezeLLM", full: "Dense-Only Fisher-Weighted SqueezeLLM Adaptation", color: "#5d7f79", bits: 3.375, about: "Squared per-sample gradients form a diagonal empirical-Fisher weight for tile-local Lloyd–Max fitting; the sparse outlier residual is intentionally omitted.", kernel: "The result remains a dense two-K32 LUT-B payload with 16 native SFB values; MiniMax uses a factorized-Fisher proxy." },
+  nf3:     { label: "NF3", full: "Zero-Aware NormalFloat-3 LUT W3A8", color: "#b55f5f", bits: 3.375, about: "A static normal-distribution-inspired eight-level codebook is adapted to include an exact zero, without per-tile iterative optimization.", kernel: "The same two-K32 LUT-B payload and 16 native SFB values as other 3-bit rows; only the offline centroid rule changes." },
+  uniform: { label: "Uniform", full: "Uniform Scalar LUT W3A8 Baseline", color: "#a33d2f", bits: 3.375, about: "Each tile uses eight evenly spaced reconstruction levels, providing the simplest hardware-shaped 3-bit baseline.", kernel: "The same E4M3/UE8M0 A8 and two-K32 LUT-B storage contract with 16 native SFB values; no algorithmic error correction." },
 };
 const W_DATA = {
   qwen: { label: "Qwen3-4B", values: {
@@ -1411,8 +1414,21 @@ function renderWeight() {
   payloadRow(host,"BF16 W",16,"#8d8777");
   payloadRow(host,"FP8 W",8,"#7b7565");
   payloadRow(host,row.label,row.bits,row.color);
-  $("wxKernel").innerHTML = "<b>"+row.label+".</b> "+row.kernel+
-    (row.bits < 16 ? " Physical payload: 192 B indices + 8 B LUT + 16 B scales. The large speedup above is a pure weight-read roofline, not measured kernel latency." : "");
+  let storage;
+  if (row.bits === 16) {
+    storage = "Dense BF16 weights: 16 bits/weight; no LUT or SFB payload.";
+  } else {
+    const scaleBytes = row.bits === 3.25 ? 8 : 16;
+    storage = "Per K64\u00d7N8 tile: 192 B indices + 8 B LUT + "+scaleBytes+" B SFB = "+
+      (200+scaleBytes)+" B ("+row.bits.toFixed(3)+" bits/weight)."+
+      (row.global ? " One tensor-global FP32 scale is amortized separately." : "");
+  }
+  $("wxKernel").innerHTML =
+    '<div class="method-full">'+row.full+'</div>'+
+    '<div class="method-line">'+row.about+'</div>'+
+    '<div class="method-line"><strong>Kernel.</strong> '+row.kernel+'</div>'+
+    '<div class="method-line"><strong>Storage.</strong> '+storage+'</div>'+
+    '<div class="method-line faint">The speedup above is a pure weight-read roofline, not measured kernel latency.</div>';
   renderWeightChart();
 }
 
