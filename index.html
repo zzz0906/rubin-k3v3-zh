@@ -58,23 +58,18 @@
     padding: 64px 0 8px;
     text-align: center;
   }
+  header.paper .wrap { max-width: 1200px; padding: 0 12px; }
   h1.title {
     font-family: var(--serif);
     font-weight: 600;
-    font-size: clamp(24px, 3vw, 32px);
-    line-height: 1.4;
+    font-size: clamp(24px, 3vw, 38px);
+    line-height: 1.25;
+    letter-spacing: -.005em;
     margin: 0 auto 10px;
-    max-width: 860px;
+    max-width: 1120px;
     color: var(--ink);
   }
-  h1.title .subtitle-line { display: block; font-size: .7em; font-weight: 500; color: var(--ink-2); margin-top: 6px; }
-  .authors {
-    display: flex; justify-content: center; gap: 30px; flex-wrap: wrap;
-    font-family: var(--serif); font-size: 16.5px; font-weight: 500; color: var(--ink);
-    letter-spacing: .01em; margin: 16px 0 5px;
-  }
-  .meta { font-family: var(--serif); font-size: 14px; color: var(--muted); }
-  .meta a { color: var(--accent); text-decoration: none; border-bottom: 1px solid rgba(138,106,20,.35); }
+  .meta { font-family: var(--serif); font-size: 14px; color: var(--muted); font-style: italic; }
   .head-rule { border: 0; border-top: 1.5px solid var(--ink-2); margin: 26px auto 0; opacity: .55; }
 
   /* ---------- figure card ---------- */
@@ -258,10 +253,7 @@
 
 <header class="paper">
   <div class="wrap">
-    <h1 class="title">Vera Rubin LUT-B：3-bit Weight、Activation 与 KV
-      <span class="subtitle-line">Accuracy、Kernel 与 Simulation Estimate</span>
-    </h1>
-    <div class="authors"><span>Zhongzhu Zhou</span><span>Donglin Zhuang</span><span>Chenfeng Xu</span></div>
+    <h1 class="title">Vera Rubin LUT-B：3-bit Weight、Activation 与 KV 的 Accuracy-First Study</h1>
     <div class="meta">2026 年 8 月 13 日</div>
     <hr class="head-rule">
   </div>
