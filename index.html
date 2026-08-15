@@ -309,7 +309,7 @@
       </div>
       <div class="panel">
         <div class="panel-head">
-          <div class="stat-k">Selected method weight-read ceiling</div>
+          <div class="stat-k">Byte-only upper bound · 不是 kernel estimate</div>
           <div class="stat-v" id="wxBits">–</div>
           <div class="stat-s" id="wxRatio">–</div>
         </div>
@@ -320,8 +320,9 @@
     <div class="fig-note">
       <b>Contract correction。</b>Linear weight 是 W[N,K]，B=Wᵀ[K,N]。CUDA reference tile 是 512 indices +
       一个 E4M3 LUT，即 3.125 bits/weight。可选 native block scaling 每个 N row 增加一个 UE8M0 SFB
-      （8 bytes/tile），得到 3.25 bits/weight。Two-K32 使用 16 个 factors 与 3.375 bits/weight。Global scale
-      是 folded software metadata，不是 native LUT-B operand。
+      （8 bytes/tile），得到 3.25 bits/weight。PTX 9.4 的 MXFP8 LUT-B 只暴露这个 K64
+      <code>scale_B=1×N</code> path；所有 two-K32/16-factor 结果现在都标为 non-native quality oracle。
+      Global scale 是 folded software metadata，不是 native LUT-B operand。
     </div>
   </section>
 
@@ -389,9 +390,9 @@
       uniform 与 OSCAR INT2 两行以 BF16 Q/P 测得。Kimi K3 只量化 24 个 Gated-MLA 层的 512-d MLA latent；
       Kimi PPL 沿用 native 的 last-2048-NLL protocol，不可跨模型比较。<b>速度。</b>针对 Qwen3-4B decode（36 层 · 32 Q / 8 KV heads ·
       head dim 128）的 attention-only 解析 roofline：K3V3 每值存 3.125 bit 外加 BF16 窗口（8K 下约 3.63 b/val），
-      且上限已包含 B-only LUT 约束 —— MXFP8 的 M tile 固定为 128，GQA4 single-token decode 只能填 4 行，
-      算力上限被压到 273.4 TFLOP/s。不含 weights、MLP、sampling 与调度。完整消融见
-      <a href="#sec4">§5.2</a>；含 B200、执行效率区间与 byte-only 上界的完整推导见
+      MXFP8 的 M tile 固定为 128，GQA4 single-token decode 最多填 4 行。因为 LUT-B throughput 未公开，
+      panel 只显示 10%/25%/50%/100%-of-dense sensitivity endpoints，不再给 expected range。不含 weights、
+      MLP、sampling 与调度。完整消融见 <a href="#sec4">§5.2</a>；完整推导见
       <a href="#throughput">§5.3</a>。Kimi panel 使用 14.3 GB/GPU runtime reserve，并把固定 HBM pool
       平均分给并发 requests；这是 allocation arithmetic，不是 supported context claim。
     </div>
@@ -404,9 +405,9 @@
       <h2>TL;DR</h2>
       <ol>
         <li><strong>Weight 是最自然的 LUT-B target，但 scale contract 必须分清。</strong>CUDA 13.4 reference
-          LUT payload 是 3.125 bits/weight；paired SFB+global 在 one-K64 下是 3.25、two-K32 下是 3.375。
-          Two-K32 通常降低 RMS² PPL，但可能恶化 KL₅₀；H64 同样取决于 model/context。Qwen/Gemma/MiniMax
-          paired-scale cells 现已全部实测。</li>
+          LUT payload 是 K64 3.125 bits/weight，native SFB path 是 K64 3.25 bits/weight。实测的 3.375-bit
+          two-K32 rows 是 non-native quality oracle。即使 32.33× weight-byte ceiling 也要求 LUT-B 达到约
+          79% dense FP8 throughput，目前没有公开证据。</li>
         <li><strong>当前 LUT-B MMA 不支持 A3 作为 matrix A。</strong>公开 PTX 只有 B operand 的 lookup
           decompression；W3 已占用该 operand，因此 W3A3 无法编码。本文支持的 pairing 是 E4M3 A +
           UE8M0 K32 scale 与 3-bit LUT-B operand。</li>
@@ -502,10 +503,12 @@ effective         = 3.125 bit/value</code></pre>
         <tr><td>UE5M3 conversion</td><td><span class="ok">SUPPORTED</span></td><td><code>F2FP.SATFINITE.UE5M3</code></td><td>The UE5M3 datatype itself exists</td></tr>
         <tr><td>Dense E4M3 A × LUT-B E4M3 B</td><td><span class="ok">SUPPORTED</span></td><td><code>UTCQMMA.LUTB</code></td><td>The basic QK/PV mapping is legal</td></tr>
         <tr><td>MXFP8 block32 A × LUT-B B</td><td><span class="ok">SUPPORTED</span></td><td><code>UTCQMMA.LUTB</code> + scale TMEM</td><td>Scaled Q/P can be fused</td></tr>
+        <tr><td>Two independent K32 B scales</td><td><span class="no">NOT NATIVE</span></td><td>PTX Tables 70–71</td><td><code>mxf8f6f4</code> 只暴露 <code>scale_vec::1X</code></td></tr>
+        <tr><td>LUT-B full-tile throughput</td><td><span class="faint">UNKNOWN</span></td><td>No PTX/spec value</td><td>17.5P dense FP8 不是 LUT-B rate</td></tr>
         <tr><td>LUT-B collector B reuse</td><td><span class="ok">SUPPORTED</span></td><td><code>B_KEEP</code> → <code>B_REUSE</code></td><td>One K/V tile can be reused across GQA heads</td></tr>
         <tr><td>Sparse A × ordinary B</td><td><span class="ok">SUPPORTED</span></td><td><code>UTCQMMA</code> control</td><td>Sparse-A MMA itself exists</td></tr>
         <tr><td>Sparse A × LUT-B B</td><td><span class="no">UNSUPPORTED</span></td><td><code>ptxas</code> rejects <code>mma.sp...lut::b</code></td><td>Sparse P cannot be combined with LUT-B V</td></tr>
-        <tr><td>MXFP8 + UE5M3 scale + LUT-B</td><td><span class="no">UNSUPPORTED</span></td><td>PTX 9.4 Table 69</td><td>The FP8 scale must use UE8M0</td></tr>
+        <tr><td>MXFP8 + UE5M3 scale + LUT-B</td><td><span class="no">UNSUPPORTED</span></td><td>PTX 9.4 Table 71</td><td>The FP8 scale must use UE8M0</td></tr>
         <tr><td>Transposed LUT-B B</td><td><span class="no">UNSUPPORTED</span></td><td>PTX 9.4 restriction</td><td>K must be stored physically as Kᵀ</td></tr>
       </tbody>
     </table></div>
@@ -543,14 +546,15 @@ effective         = 3.125 bit/value</code></pre>
 
     <h3>3.1 Accuracy</h3>
     <p>
-      表格保留原 two-K32 rows，并加入 one-K64/two-K32 的 native SFB + tensor-global scale rows。
+      表格保留原 two-K32 rows，并加入 native one-K64 rows。重新审计 PTX 9.4 后，所有 two-K32 rows
+      都归类为 <strong>non-native quality oracle</strong>；只有 one-K64 SFB rows 映射到 Rubin LUT-B。
       PPL/KL 使用一个 131072-token block 与 256 个 KL₅₀ samples。方法包括 GPTQ
       <span class="cite"><a href="#ref-gptq">[4]</a></span>、QuaRot-style H64
       <span class="cite"><a href="#ref-quarot">[7]</a></span>，以及 RMS²-weighted Lloyd-Max
       <span class="cite"><a href="#ref-max">[1]</a><a href="#ref-lloyd">[2]</a></span>。
     </p>
     <div class="table-wrap"><table class="data">
-      <caption>128K accuracy; every “+ global” row also includes native SFB block scaling</caption>
+      <caption>128K accuracy；one-K64 是 native candidate，two-K32 只作为 quality oracle</caption>
       <thead><tr><th>128K method</th><th class="num">Qwen PPL / KL₅₀</th><th class="num">Gemma PPL / KL₅₀</th><th class="num">MiniMax routed PPL / KL₅₀</th></tr></thead>
       <tbody>
         <tr><td>BF16 W + BF16 A</td><td class="num"><strong>8.482 / 0.00000</strong></td><td class="num"><strong>5.771 / 0.00000</strong></td><td class="num"><strong>4.124 / 0.00000</strong></td></tr>
@@ -571,9 +575,8 @@ effective         = 3.125 bit/value</code></pre>
       </tbody>
     </table></div>
     <p>
-      H64 和 RMS² 对 schedule/scale granularity 的响应不同。Two-K32+global 同时改善 Qwen/Gemma 的 RMS²
-      PPL/KL，也降低 MiniMax PPL，但 MiniMax KL₅₀ 更偏向 one-K64。H64 同样取决于 model/context，而且
-      不是免费 offline trick：A 需要对应 runtime transform。
+      Two-K32 oracle 说明更细 scaling 可以改善 quality，但它不是 deployable Rubin schedule。Native
+      one-K64 rows 中，H64 在本 sweep 里优于 RMS²，同时仍需在 A 上执行 matching runtime transform。
     </p>
 
     <h3>3.2 Kernel Organization</h3>
@@ -582,11 +585,11 @@ one B tile = W[n:n+8, k:k+64]
 reference  = 192 B indices + 8 B LUT             = 200 B = 3.125 bit/W
 native SFB = reference + 8 × UE8M0 (scale_B=1×N) = 208 B = 3.250 bit/W
 global     = one FP32 scale/tensor, folded outside the LUT-B instruction
-two K32    = reference + 16 K32-SFB factors       = 216 B = 3.375 bit/W</code></pre>
+two K32    = 216 B = 3.375 bit/W，algorithm oracle only（not native LUT-B）</code></pre>
     <div class="table-wrap"><table class="data">
       <thead><tr><th>Method family</th><th>Offline work</th><th>Runtime change beyond MXFP8-A × LUT-B-B</th></tr></thead>
       <tbody>
-        <tr><td>LM / RMS² / GPTQ / SqueezeLLM</td><td>Fit tile-local LUT and pack indices/scales</td><td>None</td></tr>
+        <tr><td>LM / RMS² / GPTQ / SqueezeLLM</td><td>Fit tile-local LUT and pack indices/scales</td><td>只有 K64-contract rerun 才是 native；原始 rows 是 two-K32 oracle</td></tr>
         <tr><td>Folded AWQ</td><td>Fold scale into RMSNorm and consumer weights, then fit LUT</td><td>None for supported fold groups</td></tr>
         <tr><td>Random-H64 + GPTQ</td><td>Rotate every K64 weight block before fitting</td><td>Matching signed H64 on each A K64 block</td></tr>
         <tr><td>MiniMax routed methods</td><td>Apply the same K64×N8 format to routed experts</td><td>Current simulation changes routed gate input only</td></tr>
@@ -595,28 +598,27 @@ two K32    = reference + 16 K32-SFB factors       = 216 B = 3.375 bit/W</code></
 
     <h3>3.3 Simulation Estimate</h3>
     <div class="table-wrap"><table class="data">
-      <thead><tr><th>Rubin Weight Contract</th><th class="num">Bits/W</th><th class="num">vs H100 BF16</th><th class="num">vs B200 BF16</th><th class="num">vs Rubin BF16</th></tr></thead>
+      <thead><tr><th>Native Rubin Weight Contract</th><th class="num">Bits/W</th><th class="num">Byte-only vs H100 BF16</th><th class="num">Byte-only vs B200 BF16</th><th class="num">Required LUT-B Rate</th></tr></thead>
       <tbody>
-        <tr><td>One K64：native SFB + folded global scale</td><td class="num">3.250</td><td class="num">32.31×</td><td class="num">13.54×</td><td class="num">4.92×</td></tr>
-        <tr><td>Two K32：native SFB + folded global scale</td><td class="num">3.375</td><td class="num">31.10×</td><td class="num">13.04×</td><td class="num">4.74×</td></tr>
+        <tr><td>Reference K64 LUT</td><td class="num">3.125</td><td class="num">33.62×</td><td class="num">14.08×</td><td class="num">14.42P = 82.4% dense FP8</td></tr>
+        <tr><td>K64 native SFB + folded global scale</td><td class="num">3.250</td><td class="num">32.33×</td><td class="num">13.54×</td><td class="num">13.86P = 79.2% dense FP8</td></tr>
       </tbody>
     </table></div>
     <div class="table-wrap"><table class="data">
-      <caption>One-K64 versus two-K32 under paired SFB + global scale</caption>
-      <thead><tr><th>Schedule</th><th class="num">SFB/tile</th><th class="num">Bits/W</th><th class="num">MMA instructions/K64</th><th>Measured tendency</th></tr></thead>
+      <caption>Useful weight-only sensitivity bound；不是 measured/expected throughput</caption>
+      <thead><tr><th class="num">LUT-B / dense FP8 assumption</th><th class="num">vs Rubin BF16</th><th class="num">vs H100 BF16</th><th class="num">vs B200 BF16</th></tr></thead>
       <tbody>
-        <tr><td>One K64</td><td class="num">8</td><td class="num">3.25</td><td class="num">1</td><td>Higher byte ceiling; MiniMax RMS² has lower KL₅₀</td></tr>
-        <tr><td>Two K32</td><td class="num">16</td><td class="num">3.375</td><td class="num">2</td><td>Finer scaling; Qwen/Gemma RMS² improve, MiniMax trades PPL for KL₅₀</td></tr>
+        <tr><td class="num">10%</td><td class="num">0.62×</td><td class="num">4.08×</td><td class="num">1.71×</td></tr>
+        <tr><td class="num">25%</td><td class="num">1.55×</td><td class="num">10.20×</td><td class="num">4.27×</td></tr>
+        <tr><td class="num">50%</td><td class="num">3.11×</td><td class="num">20.41×</td><td class="num">8.54×</td></tr>
+        <tr><td class="num">≥79.2%</td><td class="num">up to 4.92×</td><td class="num">up to 32.33×</td><td class="num">up to 13.54×</td></tr>
       </tbody>
     </table></div>
     <p>
-      每个数都直接按
-      <code>(22 TB/s ÷ baseline bandwidth) × (16 bits ÷ stored bits/weight)</code> 计算。例如 one-K64
-      相对 H100 是 <code>(22 ÷ 3.35) × (16 ÷ 3.25) = 32.31×</code>，相对 B200 是
-      <code>(22 ÷ 8) × (16 ÷ 3.25) = 13.54×</code>。这些只是 weight-read bound，假设所有 useful bytes
-      都是 weight traffic、达到 public peak HBM、且 LUT-B MMA 跟得上。A read、output write、small-M
-      occupancy、routing、H64 与 MLP schedule 都会降低收益；只有 Rubin measurement 才能把 byte ratio
-      变成 kernel 或 end-to-end number。
+      32.33× 只是最右侧 byte ceiling。达到它要求 LUT-B 先持续提供 13.86 PFLOP/s，也就是 Rubin dense FP8
+      peak 的约 79.2%，而且尚未计入 A/output traffic、H64、epilogue、routing 与 scheduling。NVIDIA 没有
+      公开 LUT-B rate，因此这里只给 sensitivity rows，不再给 expected kernel range；two-K32 oracle 不分配
+      任何 speed estimate。
     </p>
 
     <h2 id="activation"><span class="idx">4</span>Activation Quantization：保留 A8；当前不支持 A3</h2>
@@ -877,9 +879,8 @@ two K32    = reference + 16 K32-SFB factors       = 216 B = 3.375 bit/W</code></
       H100 数据来自 <a href="https://www.nvidia.com/en-us/data-center/h100/">NVIDIA H100 specs</a>；B200 使用
       <a href="https://docs.nvidia.com/enterprise-reference-architectures/hgx-ai-factory/latest/components.html">NVIDIA HGX component specs</a>
       的 180 GB / up to 8 TB/s，以及公开 4.5 PFLOP/s dense FP8。NVIDIA 把 Rubin 的 17.5 PFLOP/s FP8/FP6
-      数字列为 dense specification；把它按 sparse peak 折半是不正确的。不过 NVIDIA 没有单独公开
-      <code>decompress::lut::b</code> throughput，所以 8.75/17.5 PFLOP/s 只能作为 sensitivity endpoints，
-      不能当作实测 LUT-B rate。
+      数字列为 dense specification。不过 NVIDIA 没有单独公开 <code>decompress::lut::b</code> throughput，
+      因此本文只给 10%/25%/50%/100%-of-dense sensitivity endpoints；它们不是 expected efficiency。
     </p>
     <p>
       Qwen3-4B-Thinking-2507 有 36 layers、32 Q heads、8 KV heads、head dim 128。每个 decode token 的
@@ -906,17 +907,18 @@ two K32    = reference + 16 K32-SFB factors       = 216 B = 3.375 bit/W</code></
       对应 arithmetic intensity 为 17.64 / 19.69 FLOP/B。
     </p>
     <div class="table-wrap"><table class="data">
-      <thead><tr><th>GPU</th><th class="num">8K Compressed-byte Roofline</th><th class="num">8K tok/s</th><th class="num">32K Compressed-byte Roofline</th><th class="num">32K tok/s</th><th>Native Execution?</th></tr></thead>
+      <thead><tr><th>GPU</th><th class="num">8K Compressed-byte Normalization</th><th class="num">8K tok/s</th><th class="num">32K Compressed-byte Normalization</th><th class="num">32K tok/s</th><th>Native Execution?</th></tr></thead>
       <tbody>
         <tr><td>H100 SXM</td><td class="num">59.1 TFLOP/s</td><td class="num">12.23K</td><td class="num">66.0 TFLOP/s</td><td class="num">3.41K</td><td>No: requires software unpack</td></tr>
         <tr><td>B200 SXM</td><td class="num">141.1 TFLOP/s</td><td class="num">29.21K</td><td class="num">157.5 TFLOP/s</td><td class="num">8.15K</td><td>No: no LUT-B</td></tr>
-        <tr><td>Rubin</td><td class="num"><strong>388.1 TFLOP/s</strong></td><td class="num"><strong>80.32K</strong></td><td class="num"><strong>433.1 TFLOP/s</strong></td><td class="num"><strong>22.41K</strong></td><td>Yes：<code>UTCQMMA.LUTB</code></td></tr>
+        <tr><td>Rubin</td><td class="num">388.1 TFLOP/s</td><td class="num">80.32K</td><td class="num">433.1 TFLOP/s</td><td class="num">22.41K</td><td>仅 byte ceiling；native syntax 存在</td></tr>
       </tbody>
     </table></div>
     <p>
       H100/B200 两行只是“如果 HBM 只搬这些 compressed bytes”的 normalization ceiling，不是可执行的 native
       K3V3 performance。它们必须先用 software unpack/dequantize，实际会增加 instructions、temporary traffic
-      和 latency。Rubin 的区别是 lookup 发生在 Tensor Core MMA 内。
+      和 latency。Rubin 的区别是 lookup 发生在 Tensor Core MMA 内，但 Rubin row 同样只是 byte ceiling，
+      不是 kernel prediction。
     </p>
 
     <p>
@@ -941,12 +943,12 @@ two K32    = reference + 16 K32-SFB factors       = 216 B = 3.375 bit/W</code></
       GQA ratio 是 4，所以一个共享 K/V tile 最多把 4 个 Q heads 打包成 4 行：
     </p>
     <div class="table-wrap"><table class="data">
-      <thead><tr><th>Orientation</th><th class="num">Useful Tile Occupancy</th><th class="num">Tile-adjusted Compute Cap</th><th class="num">8K Roofline</th><th class="num">32K Roofline</th></tr></thead>
+      <thead><tr><th>LUT-B Full-Tile Sensitivity</th><th class="num">Optimistic M Occupancy</th><th class="num">Useful Cap</th><th class="num">8K Bound</th><th class="num">32K Bound</th></tr></thead>
       <tbody>
-        <tr><td>Compressed bytes only; ignore shape</td><td class="num">—</td><td class="num">8.75 PFLOP/s</td><td class="num">388.1 TFLOP/s</td><td class="num">433.1 TFLOP/s</td></tr>
-        <tr><td><strong>LUT-B: Q/P in A, KV in B</strong></td><td class="num">M: 4 / 128 = <strong>3.125%</strong></td><td class="num"><strong>273.4 TFLOP/s</strong></td><td class="num"><strong>273.4 TFLOP/s</strong></td><td class="num"><strong>273.4 TFLOP/s</strong></td></tr>
-        <tr><td>FlashInfer dense-FP8 decode: KV in A, Q/P in B</td><td class="num">N: 4 / 16 = 25%</td><td class="num">2.1875 PFLOP/s</td><td class="num">388.1 TFLOP/s</td><td class="num">433.1 TFLOP/s</td></tr>
-        <tr><td>Hypothetical Rubin compressed-A (minimum N=8)</td><td class="num">N: 4 / 8 = 50%</td><td class="num">4.375 PFLOP/s</td><td class="num">388.1 TFLOP/s</td><td class="num">433.1 TFLOP/s</td></tr>
+        <tr><td>10% dense FP8：1.75P</td><td class="num">4 / 128 = 3.125%</td><td class="num">54.7 TFLOP/s</td><td class="num">54.7</td><td class="num">54.7</td></tr>
+        <tr><td>25% dense FP8：4.375P</td><td class="num">4 / 128 = 3.125%</td><td class="num">136.7 TFLOP/s</td><td class="num">136.7</td><td class="num">136.7</td></tr>
+        <tr><td>50% dense FP8：8.75P</td><td class="num">4 / 128 = 3.125%</td><td class="num">273.4 TFLOP/s</td><td class="num">273.4</td><td class="num">273.4</td></tr>
+        <tr><td>100% dense endpoint：17.5P</td><td class="num">4 / 128 = 3.125%</td><td class="num">546.9 TFLOP/s</td><td class="num">388.1 HBM-capped</td><td class="num">433.1 HBM-capped</td></tr>
       </tbody>
     </table></div>
     <p>
@@ -959,32 +961,24 @@ two K32    = reference + 16 K32-SFB factors       = 216 B = 3.375 bit/W</code></
       <strong>MXFP8 固定 M=128 时的 logical tile utilization</strong>。
     </p>
     <p>
-      所以对 Qwen GQA4 single-token decode，B-only constraint 把 byte-only ceiling 再除以约
-      <strong>1.42× @ 8K / 1.58× @ 32K</strong>。MHA/GQA ratio 1 受影响更大；GQA ratio 8、同一 KV 上的
-      multi-token decode，或者 speculative decode <code>T≥2</code> 则能填入更多 A rows，可能重新回到
-      bandwidth-bound。
-    </p>
-    <p>
-      另一个可测试的折中是 dense E4M3 A：<code>kind::f8f6f4</code> 支持 <code>M=64</code>，Qwen GQA4 的
-      tile-adjusted cap 会升到约 546.9 TFLOP/s，足以覆盖当前 HBM roofline；代价是失去原生 UE8M0 block32
-      scaling，需要软件缩放并重新做 accuracy validation。本文目前的质量数字对应 MXFP8/UE8M0，因此不能直接
-      认领这个更高 ceiling。如果 SM107 最终存在尚未公开的 LUT-B small-M special path，这个 cap 会改变；
-      当前 public PTX 与 compile probes 不能假设它存在。
+      达到 compressed-byte ceiling 需要 full-tile LUT-B throughput 在 8K/32K/1M 分别达到
+      <strong>12.42P / 13.86P / 14.40P</strong>，即 dense FP8 peak 的 71.0% / 79.2% / 82.3%。
+      Public PTX 没有证据说明 LUT-B 能达到这些比例，而且 4/128 本身也只是 optimistic useful-row upper bound。
+      MHA/GQA ratio 1 会更差；multi-token/speculative decode 可以填更多 rows，但必须单独建模。
     </p>
 
-    <h4>5.3.4 Operand-corrected Practical Range</h4>
+    <h4>5.3.4 Conservative Sensitivity Table</h4>
     <div class="table-wrap"><table class="data">
-      <thead><tr><th class="num">Context</th><th class="num">Effective KV bits/value</th><th class="num">Byte-only HBM roofline</th><th class="num">B-only tile-corrected ceiling</th><th class="num">Expected @ 60–80%</th><th class="num">Corrected tok/s</th><th class="num">vs Rubin BF16</th></tr></thead>
+      <thead><tr><th class="num">Context</th><th class="num">Critical LUT-B Rate</th><th class="num">10% tok/s</th><th class="num">25% tok/s</th><th class="num">50% tok/s</th><th class="num">Dense Endpoint tok/s</th></tr></thead>
       <tbody>
-        <tr><td class="num">8K</td><td class="num">3.628</td><td class="num">388.1 TFLOP/s</td><td class="num"><strong>273.4 TFLOP/s</strong></td><td class="num"><strong>164.1–218.8 TFLOP/s</strong></td><td class="num">56.59K</td><td class="num">3.11×</td></tr>
-        <tr><td class="num">32K</td><td class="num">3.251</td><td class="num">433.1 TFLOP/s</td><td class="num"><strong>273.4 TFLOP/s</strong></td><td class="num"><strong>164.1–218.8 TFLOP/s</strong></td><td class="num">14.15K</td><td class="num">3.11×</td></tr>
+        <tr><td class="num">8K</td><td class="num">12.42P (71.0%)</td><td class="num">11.32K</td><td class="num">28.30K</td><td class="num">56.59K</td><td class="num">80.32K</td></tr>
+        <tr><td class="num">32K</td><td class="num">13.86P (79.2%)</td><td class="num">2.83K</td><td class="num">7.07K</td><td class="num">14.15K</td><td class="num">22.41K</td></tr>
+        <tr><td class="num">1M</td><td class="num">14.40P (82.3%)</td><td class="num">88</td><td class="num">221</td><td class="num">442</td><td class="num">728</td></tr>
       </tbody>
     </table></div>
     <p>
-      加入 operand shape 后，single-token attention-only ceiling 相对 H100 BF16 约为 <strong>20.4×</strong>，
-      相对 B200 BF16 约为 <strong>8.5×</strong>；若再按 tile-corrected ceiling 的 60–80% 估计，则分别约为
-      <strong>12.3–16.4×</strong> 和 <strong>5.1–6.8×</strong>。30× 这个数字只在 byte-only roofline、
-      或能用 GQA/multi-token/small-M path 重新填满 Tensor Core 时成立。
+      这些列是彼此独立的 sensitivity endpoints，不是 prediction interval 或 expected efficiency range。
+      Dense endpoint 尤其不能被当作默认结果。
     </p>
     <div class="callout">
       如果完全失去 GQA B-tile reuse，8K/32K bandwidth ceiling 会降到约 97.0 / 108.3 TFLOP/s，此时又会变回
@@ -1019,9 +1013,9 @@ two K32    = reference + 16 K32-SFB factors       = 216 B = 3.375 bit/W</code></
       <li><strong>Quality 来自 numerical simulation，不是 packed Rubin execution。</strong>H100/B200 在
         multiply 前恢复 fake-quantized tensors。Index/LUT/SFB format 被显式模拟，但最终 fused Weight/KV
         kernels 尚未在 Rubin 上运行。</li>
-      <li><strong>Full-tile LUT-B throughput 未知。</strong>8.75/17.5-PFLOP/s 只用于观察结果对这一未知量的
-        敏感性；fused softmax、page traversal、row packing、collector reuse 与 achieved HBM bandwidth
-        共同决定实机结果。</li>
+      <li><strong>Full-tile LUT-B throughput 未知。</strong>10%/25%/50%/100%-of-dense rows 只用于观察
+        sensitivity，不是 expected efficiency。CUDA 13.4 Developer Preview performance data 也不能用于
+        characterize Rubin。</li>
       <li><strong>Layout work 取决于 architecture 与 deployment。</strong>H64/OSCAR transforms、dynamic
         cache packing、MLA retiling、tensor/context sharding 与 hybrid non-attention layers 都不在 isolated
         GEMM roofline 内，end-to-end implementation 必须计入。</li>
@@ -1033,23 +1027,23 @@ two K32    = reference + 16 K32-SFB factors       = 216 B = 3.375 bit/W</code></
       <li><strong>A8 稳定；当前所需 operand position 不支持 A3。</strong>8K–128K 的 A8-only KL₅₀ 都不超过
         0.05375。当前 LUT-B 没有 LUT-A，因此 W3A3/KV3A3 无法用同一条 MMA。</li>
       <li><strong>W3 quality 更依赖算法，而不是“3-bit”这个名字。</strong>H64+GPTQ 是跨模型最稳健的 family；
-        uniform/NF3 会崩溃。Native SFB、global scale、K64 与 two-K32 都会改变 quality，但没有一个 schedule
-        在所有模型和 context 上都获胜。</li>
+        uniform/NF3 会崩溃。更细 two-K32 scaling 会改善部分 quality，但这些 rows 是 non-native oracle；
+        只有 one-K64 rows 是 Rubin kernel candidate。</li>
       <li><strong>KV3 需要 nonuniform codebook，困难场景还需要 rotation。</strong>Uniform Qwen K3V3 达到
         PPL 1504/KL₅₀ 5.15；offline Lloyd-Max 把 PPL 拉回约 10.4。Latent OSCAR 把 Kimi K3 从
         1.601/0.00800 改善到 1.564/0.00679，并把 GPQA 三种子从 83.16% 提到 89.73%。</li>
     </ul>
     <h3>7.2 Performance</h3>
     <ul>
-      <li><strong>Weight 是最干净的 LUT-B deployment。</strong>Static <code>Wᵀ</code> 可以离线 fit/pack。
-        One-K64 native-SFB 的 3.25-bit payload 按明确的 bandwidth-and-byte 公式得到相对 H100/B200 BF16
-        的 32.31×/13.54× weight-read bound；它们不是 model speedup。</li>
+      <li><strong>Weight mapping 最干净，但旧 headline 只是 byte ceiling。</strong>Native 3.25-bit K64 path
+        要达到 H100 BF16 的 32.33×，首先要求 LUT-B 达到 13.86P，即 dense FP8 的 79.2%，且尚未计入所有
+        non-weight overhead。25%/50% sensitivity 只有 10.20×/20.41×。</li>
       <li><strong>KV 随 context 增长节省更多 bytes，但 decode shape 决定 utilization。</strong>GQA4
         single-token decode 只有 4/128 M-row occupancy；MLA 可让多个 local heads 复用同一 latent，不继承
         相同的 underfill。</li>
-      <li><strong>Qwen attention-only 结果是 sensitivity range，不是 point forecast。</strong>1M 时分析区间
-        是 H100 BF16 的 20.4×–33.6×。Request-capacity table 同样只是 HBM allocation arithmetic；必须有
-        silicon measurement 与 fused runtime 才能给 end-to-end claim。</li>
+      <li><strong>Qwen attention 现在是 sensitivity table，不是 range。</strong>1M 下 10%/25%/50%/100%
+        endpoints 分别为 88/221/442/728 attention tok/s；最后一个值要求 LUT-B 超过 dense FP8 的 82% 才能
+        触及 byte ceiling。任何 end-to-end claim 都必须等待 silicon measurement。</li>
     </ul>
 
     <h2 id="repro">Reproducibility</h2>
@@ -1061,6 +1055,7 @@ git checkout zhongzhu/oscar-int3-rubin-simulate</code></pre>
         <code>rotation/multimodel/</code> 下的 manifests 重现 8K/64K/128K rows。</li>
       <li><strong>KV speed tables（§5.3）：</strong><code>python3 rubin/rubin_k3v3_roofline.py --compare-hardware</code>
         —— 只依赖 Python 标准库。</li>
+      <li><strong>Weight sensitivity table：</strong><code>python3 rubin/lutb_weight_roofline.py</code>。</li>
       <li><strong>ISA compile proof：</strong><code>rubin/run_compile_probes.py
         --cuda /usr/local/cuda-13.4</code> —— 需要 CUDA 13.4 preview toolchain；校验生成的 SASS 包含
         <code>UTCQMMA.LUTB</code>。</li>
@@ -1156,19 +1151,19 @@ function hideTip() { tip.style.display = "none"; }
 const W_METHODS = {
   bf16:    { label: "BF16", full: "BF16 Weight + BF16 Activation Baseline", color: "#4a463c", bits: 16, about: "No weight or activation quantization; this is the native accuracy reference.", kernel: "Dense BF16 GEMM with no LUT, SFB, rotation, or global quantization scale." },
   a8:      { label: "A8-only", full: "BF16 Weight + MXFP8 Activation-Only QDQ", color: "#6e6a5c", bits: 16, about: "Weights remain BF16; activations are quantize-dequantized to E4M3 with one UE8M0 scale per K32 block.", kernel: "Dense BF16 weight GEMM after online A quantization; no LUT-B weight path." },
-  h64:     { label: "H64 · K32", full: "Hadamard64 + GPTQ + 2K32", color: "#3e6b5f", bits: 3.375, about: "A fixed random signed Hadamard64 rotation spreads weight outliers, then K64 block-diagonal LUT-GPTQ applies activation-Hessian error compensation.", kernel: "E4M3/UE8M0 A8, two K32 LUT-B MMAs, 16 native SFB values per K64×N8 tile, no global scale, and the matching signed H64 transform on A." },
-  h64_k64g:{ label: "H64 · K64+G", full: "Hadamard64 + GPTQ + K64 + Global Scale", color: "#2f7f6c", bits: 3.25, global: true, about: "The same signed Hadamard64 and K64 block-diagonal LUT-GPTQ recipe, evaluated with the coarser one-K64 scale schedule.", kernel: "E4M3/UE8M0 A8, one K64 LUT-B MMA, 8 native SFB values per tile, one folded tensor-global FP32 scale, and signed H64 on A." },
-  h64_k32g:{ label: "H64 · 2K32+G", full: "Hadamard64 + GPTQ + 2K32 + Global Scale", color: "#4d8f68", bits: 3.375, global: true, about: "Signed Hadamard64 first spreads outliers; K64 block-diagonal LUT-GPTQ then compensates quantization error using the calibrated activation Hessian.", kernel: "E4M3/UE8M0 A8, two K32 LUT-B MMAs, 16 native SFB values per tile, one folded tensor-global FP32 scale, and signed H64 on A." },
-  rms:     { label: "RMS² · K32", full: "Activation-RMS²-Weighted Lloyd–Max + 2K32", color: "#31607f", bits: 3.375, about: "Tile-local Lloyd–Max fitting weights each reconstruction error by the calibrated squared RMS of its activation channel.", kernel: "E4M3/UE8M0 A8 and two K32 LUT-B MMAs with 16 native SFB values per tile; all RMS² weighting is offline and no global scale is used." },
-  rms_k64g:{ label: "RMS² · K64+G", full: "Activation-RMS²-Weighted Lloyd–Max + K64 + Global Scale", color: "#4d55a5", bits: 3.25, global: true, about: "The RMS²-weighted Lloyd–Max codebook is fitted offline, then paired with one-K64 native block scaling and a tensor-global scale.", kernel: "E4M3/UE8M0 A8, one K64 LUT-B MMA, 8 native SFB values per tile, and one folded tensor-global FP32 scale." },
-  rms_k32g:{ label: "RMS² · 2K32+G", full: "Activation-RMS²-Weighted Lloyd–Max + 2K32 + Global Scale", color: "#6971b8", bits: 3.375, global: true, about: "The same offline RMS²-weighted Lloyd–Max fitting, with finer K32-local scaling plus one tensor-global scale.", kernel: "E4M3/UE8M0 A8, two K32 LUT-B MMAs, 16 native SFB values per tile, and one folded tensor-global FP32 scale." },
-  gptq:    { label: "K64 GPTQ", full: "K64 Block-Diagonal LUT-GPTQ W3A8", color: "#5b4b91", bits: 3.375, about: "Activation-Hessian column ordering and error compensation are performed offline while the output remains scalar 3-bit indices into eight E4M3 centroids.", kernel: "E4M3/UE8M0 A8 with two K32 LUT-B MMAs and 16 native SFB values per K64×N8 tile; no runtime Hessian work." },
-  scale:   { label: "Scale+LM", full: "UE8M0 Scale-Search + Lloyd–Max W3A8", color: "#b07c2b", bits: 3.375, about: "Offline fitting alternates hardware-representable UE8M0 B-scale selection with Lloyd–Max updates of the eight E4M3 centroids.", kernel: "E4M3/UE8M0 A8 with two K32 LUT-B MMAs and the same 16-value native SFB descriptor; no extra runtime search." },
-  awq:     { label: "Folded AWQ", full: "Folded Activation-Aware Weight Quantization + Lloyd–Max W3A8", color: "#a04f2d", bits: 3.375, about: "Activation-aware channel balancing is calibrated first, folded into supported RMSNorm/consumer weights, and followed by tile-local Lloyd–Max fitting.", kernel: "Two K32 LUT-B MMAs with 16 native SFB values; supported dense folds add no runtime multiply, while MiniMax uses an explicit routed expert-input scale." },
-  lm:      { label: "Lloyd-Max", full: "Tile-Local Lloyd–Max W3A8", color: "#8a6a14", bits: 3.375, about: "Each K64×N8 weight tile fits eight nonuniform centroids by nearest-center assignment and centroid updates, then rounds the final codebook to E4M3.", kernel: "E4M3/UE8M0 A8 with two K32 LUT-B MMAs and 16 native SFB values; MiniMax quantizes routed-expert w13/w2 weights only." },
-  squeeze: { label: "SqueezeLLM", full: "Dense-Only Fisher-Weighted SqueezeLLM Adaptation", color: "#5d7f79", bits: 3.375, about: "Squared per-sample gradients form a diagonal empirical-Fisher weight for tile-local Lloyd–Max fitting; the sparse outlier residual is intentionally omitted.", kernel: "The result remains a dense two-K32 LUT-B payload with 16 native SFB values; MiniMax uses a factorized-Fisher proxy." },
-  nf3:     { label: "NF3", full: "Zero-Aware NormalFloat-3 LUT W3A8", color: "#b55f5f", bits: 3.375, about: "A static normal-distribution-inspired eight-level codebook is adapted to include an exact zero, without per-tile iterative optimization.", kernel: "The same two-K32 LUT-B payload and 16 native SFB values as other 3-bit rows; only the offline centroid rule changes." },
-  uniform: { label: "Uniform", full: "Uniform Scalar LUT W3A8 Baseline", color: "#a33d2f", bits: 3.375, about: "Each tile uses eight evenly spaced reconstruction levels, providing the simplest hardware-shaped 3-bit baseline.", kernel: "The same E4M3/UE8M0 A8 and two-K32 LUT-B storage contract with 16 native SFB values; no algorithmic error correction." },
+  h64:     { label: "H64 · K32 oracle", full: "Hadamard64 + GPTQ + 2K32 Quality Oracle", color: "#3e6b5f", bits: 3.375, nativeLutb: false, about: "A fixed random signed Hadamard64 rotation spreads weight outliers, then K64 block-diagonal LUT-GPTQ applies activation-Hessian error compensation.", kernel: "Non-native oracle: PTX 9.4 LUT-B fixes compressed B at K64 and mxf8f6f4 exposes no scale_vec::2X contract for two independently addressed K32 B scales." },
+  h64_k64g:{ label: "H64 · K64+G", full: "Hadamard64 + GPTQ + K64 + Global Scale", color: "#2f7f6c", bits: 3.25, global: true, nativeLutb: true, about: "The signed Hadamard64 and K64 block-diagonal LUT-GPTQ recipe under the native one-K64 scale schedule.", kernel: "Native candidate: one K64 LUT-B MMA, 8 scale_B=1×N UE8M0 factors per tile, one folded tensor-global FP32 scale, and signed H64 on A." },
+  h64_k32g:{ label: "H64 · 2K32+G oracle", full: "Hadamard64 + GPTQ + 2K32 + Global Scale Quality Oracle", color: "#4d8f68", bits: 3.375, global: true, nativeLutb: false, about: "Signed Hadamard64 first spreads outliers; K64 block-diagonal LUT-GPTQ then compensates quantization error using the calibrated activation Hessian.", kernel: "Non-native oracle with 16 independently fitted K32-local factors; no Rubin LUT-B throughput is assigned." },
+  rms:     { label: "RMS² · K32 oracle", full: "Activation-RMS²-Weighted Lloyd–Max + 2K32 Quality Oracle", color: "#31607f", bits: 3.375, nativeLutb: false, about: "Tile-local Lloyd–Max fitting weights each reconstruction error by the calibrated squared RMS of its activation channel.", kernel: "Non-native oracle with two K32 scale groups; all RMS² weighting is offline." },
+  rms_k64g:{ label: "RMS² · K64+G", full: "Activation-RMS²-Weighted Lloyd–Max + K64 + Global Scale", color: "#4d55a5", bits: 3.25, global: true, nativeLutb: true, about: "The RMS²-weighted Lloyd–Max codebook is fitted offline, then paired with native one-K64 block scaling and a tensor-global scale.", kernel: "Native candidate: one K64 LUT-B MMA, 8 scale_B=1×N UE8M0 factors per tile, and one folded tensor-global FP32 scale." },
+  rms_k32g:{ label: "RMS² · 2K32+G oracle", full: "Activation-RMS²-Weighted Lloyd–Max + 2K32 + Global Scale Quality Oracle", color: "#6971b8", bits: 3.375, global: true, nativeLutb: false, about: "The same offline RMS²-weighted Lloyd–Max fitting, with finer K32-local scaling plus one tensor-global scale.", kernel: "Non-native oracle with 16 independently fitted K32-local factors; no Rubin LUT-B throughput is assigned." },
+  gptq:    { label: "K64 GPTQ oracle", full: "K64 Block-Diagonal LUT-GPTQ Two-K32 Quality Oracle", color: "#5b4b91", bits: 3.375, nativeLutb: false, about: "Activation-Hessian column ordering and error compensation are performed offline while the output remains scalar 3-bit indices into eight E4M3 centroids.", kernel: "The measured row used the non-native two-K32 scale oracle; a native K64 rerun is required before assigning speed." },
+  scale:   { label: "Scale+LM oracle", full: "UE8M0 Scale-Search + Lloyd–Max Two-K32 Quality Oracle", color: "#b07c2b", bits: 3.375, nativeLutb: false, about: "Offline fitting alternates UE8M0 B-scale selection with Lloyd–Max updates of the eight E4M3 centroids.", kernel: "The 16-factor two-K32 descriptor is an algorithm oracle, not a PTX 9.4 mxf8f6f4 LUT-B contract." },
+  awq:     { label: "Folded AWQ oracle", full: "Folded Activation-Aware Weight Quantization + Lloyd–Max Two-K32 Oracle", color: "#a04f2d", bits: 3.375, nativeLutb: false, about: "Activation-aware channel balancing is calibrated first, folded into supported RMSNorm/consumer weights, and followed by tile-local Lloyd–Max fitting.", kernel: "The measured row used non-native two-K32 scaling; supported dense folds add no runtime multiply, but no Rubin LUT-B speed is assigned." },
+  lm:      { label: "Lloyd-Max oracle", full: "Tile-Local Lloyd–Max Two-K32 Quality Oracle", color: "#8a6a14", bits: 3.375, nativeLutb: false, about: "Each K64×N8 weight tile fits eight nonuniform centroids by nearest-center assignment and centroid updates, then rounds the final codebook to E4M3.", kernel: "The measured 16-factor K32-local scale layout is non-native; MiniMax quantizes routed-expert w13/w2 weights only." },
+  squeeze: { label: "SqueezeLLM oracle", full: "Dense-Only Fisher-Weighted SqueezeLLM Two-K32 Oracle", color: "#5d7f79", bits: 3.375, nativeLutb: false, about: "Squared per-sample gradients form a diagonal empirical-Fisher weight for tile-local Lloyd–Max fitting; the sparse outlier residual is intentionally omitted.", kernel: "The result uses the non-native two-K32 quality contract; MiniMax uses a factorized-Fisher proxy." },
+  nf3:     { label: "NF3 oracle", full: "Zero-Aware NormalFloat-3 Two-K32 Quality Oracle", color: "#b55f5f", bits: 3.375, nativeLutb: false, about: "A static normal-distribution-inspired eight-level codebook is adapted to include an exact zero, without per-tile iterative optimization.", kernel: "The measured row uses the non-native 16-factor scale oracle; only the offline centroid rule differs." },
+  uniform: { label: "Uniform oracle", full: "Uniform Scalar LUT Two-K32 Quality Oracle", color: "#a33d2f", bits: 3.375, nativeLutb: false, about: "Each tile uses eight evenly spaced reconstruction levels, providing the simplest 3-bit numerical baseline.", kernel: "The measured row uses the non-native two-K32 scale oracle and receives no Rubin speed estimate." },
 };
 const W_DATA = {
   qwen: { label: "Qwen3-4B", values: {
@@ -1187,7 +1182,7 @@ const W_DATA = {
     131072: { bf16:[4.124,0], a8:[4.115,.01756], h64:[5.076,.20916], h64_k64g:[5.078,.23976], h64_k32g:[5.032,.21195], gptq:[5.327,.24296], awq:[5.404,.29059], rms:[6.474,.42795], rms_k64g:[5.014,.17007], rms_k32g:[4.986,.18677], squeeze:[6.513,.43720], lm:[7.488,.58320], scale:[7.835,.65367], uniform:[535932.314,12.15861], nf3:[2032820.392,13.30284] },
   }},
 };
-const wState = { model: "qwen", ctx: 131072, method: "h64_k32g", view: "all" };
+const wState = { model: "qwen", ctx: 131072, method: "h64_k64g", view: "all" };
 
 /* ============================================================
    Data — Qwen3-4B-Thinking-2507
@@ -1228,8 +1223,7 @@ const MODELS = {
 /* Qwen3-4B attention-only sensitivity scenarios, matching \u00a76 */
 const MODEL = { layers: 36, qHeads: 32, kvHeads: 8, headDim: 128 };
 const HI_WINDOW = 320;                       // BF16 sink 64 + recent 256
-const TILE_UTIL = 4 / 128;                   // MXFP8 M=128, 4 useful GQA rows
-const LUTB_HALF_RATE = 8.75e15;              // sensitivity case, not a specification
+const TILE_UTIL = 4 / 128;                   // optimistic useful-row upper bound
 const RUBIN_DENSE_FP8 = 17.5e15;             // NVIDIA published dense FP8/FP6 rate
 const CTX_LABEL = { 8192: "8K", 32768: "32K", 1048576: "1M" };
 const flopsPerTok = (ctx) => 4 * MODEL.qHeads * MODEL.headDim * ctx * MODEL.layers;
@@ -1242,9 +1236,15 @@ function speedAt(ctx) {
   const h100 = 3.35e12 / bB;
   const rubinBF16 = 22e12 / bB;
   const byte = 22e12 / bK;
-  const halfRate = Math.min(byte, LUTB_HALF_RATE * TILE_UTIL / fl);
-  const denseRate = Math.min(byte, RUBIN_DENSE_FP8 * TILE_UTIL / fl);
-  return { fl, bB, bK, h100, rubinBF16, byte, halfRate, denseRate };
+  const sensitivity = fraction =>
+    Math.min(byte, RUBIN_DENSE_FP8 * fraction * TILE_UTIL / fl);
+  return {
+    fl, bB, bK, h100, rubinBF16, byte,
+    p10: sensitivity(.10),
+    p25: sensitivity(.25),
+    p50: sensitivity(.50),
+    denseEndpoint: sensitivity(1.0),
+  };
 }
 
 const hx = { model: "qwen", preset: "lm", ctx: 1048576, layout: "single", klView: "focus" };
@@ -1407,9 +1407,20 @@ function renderWeight() {
   $("wxPpl").textContent = "PPL "+row.ppl.toFixed(3)+" · "+model.label+" @ "+(wState.ctx/1024)+"K";
   const h100Ceiling = 22 / 3.35 * 16 / row.bits;
   const b200Ceiling = 22 / 8 * 16 / row.bits;
-  $("wxBits").textContent = h100Ceiling.toFixed(1)+"×";
+  const criticalDenseFraction = 22e12 * 16 * 128 /
+    (row.bits * 17.5e15);
+  $("wxBits").textContent = row.nativeLutb === false
+    ? "N/A"
+    : "\u2264"+h100Ceiling.toFixed(1)+"×";
   $("wxBits").style.color = row.color;
-  $("wxRatio").textContent = "vs H100 BF16 weight-read ceiling · "+b200Ceiling.toFixed(1)+"× vs B200";
+  $("wxRatio").textContent = row.nativeLutb === false
+    ? "quality oracle only · no native PTX 9.4 LUT-B schedule"
+    : (
+      row.bits < 16
+        ? "requires \u2265"+(100*criticalDenseFraction).toFixed(0)+"% of dense FP8 LUT-B \u00b7 \u2264"+
+          b200Ceiling.toFixed(1)+"× vs B200"
+        : "raw-bandwidth normalization only"
+    );
   const host = $("wxBars"); host.innerHTML="";
   payloadRow(host,"BF16 W",16,"#8d8777");
   payloadRow(host,"FP8 W",8,"#7b7565");
@@ -1428,7 +1439,11 @@ function renderWeight() {
     '<div class="method-line">'+row.about+'</div>'+
     '<div class="method-line"><strong>Kernel.</strong> '+row.kernel+'</div>'+
     '<div class="method-line"><strong>Storage.</strong> '+storage+'</div>'+
-    '<div class="method-line faint">The speedup above is a pure weight-read roofline, not measured kernel latency.</div>';
+    '<div class="method-line faint">'+(
+      row.nativeLutb === false
+        ? "This row has no Rubin kernel speed estimate."
+        : "The speedup above is a byte-only ceiling. Reaching it requires unpublished LUT-B throughput near the dense-FP8 rate."
+    )+'</div>';
   renderWeightChart();
 }
 
@@ -1598,9 +1613,11 @@ function renderSpeed() {
   $("hxTokK").textContent = "Speed \u2014 attention-only tok/s @ " + ctxL;
 
   if (p.kind === "k3v3") {
-    $("hxTok").textContent = fmtTok(sp.halfRate) + "\u2013" + fmtTok(sp.denseRate);
+    $("hxTok").textContent =
+      fmtTok(sp.p10)+" / "+fmtTok(sp.p25)+" / "+fmtTok(sp.p50);
     $("hxTok").style.color = "#8a6a14";
-    $("hxTokSub").textContent = "two LUT-B sensitivity scenarios \u00b7 hardware measurement required";
+    $("hxTokSub").textContent =
+      "10% / 25% / 50% of dense FP8 sensitivity \u00b7 not an expected range";
   } else if (p.kind === "bf16") {
     $("hxTok").textContent = fmtTok(sp.rubinBF16);
     $("hxTok").style.color = "#4a463c";
@@ -1613,14 +1630,19 @@ function renderSpeed() {
 
   const host = $("hxBars");
   host.innerHTML = "";
-  const max = p.kind === "k3v3" ? sp.denseRate : sp.rubinBF16;
+  const max = p.kind === "k3v3" ? sp.denseEndpoint : sp.rubinBF16;
   barRow(host, "H100 \u00b7 BF16 KV", sp.h100, max, "#b3ac94", { valText: fmtTok(sp.h100) + " \u00b7 1.00\u00d7" });
   barRow(host, "Rubin \u00b7 BF16 KV", sp.rubinBF16, max, "#6e6a5c", { valText: fmtTok(sp.rubinBF16) + " \u00b7 " + fmtX(sp.rubinBF16 / sp.h100) });
   if (p.kind === "k3v3") {
-    barRow(host, "K3V3 \u00b7 half-rate LUT-B", sp.halfRate, max, "#a97f19",
-      { valText: fmtTok(sp.halfRate) + " \u00b7 " + fmtX(sp.halfRate / sp.h100) });
-    barRow(host, "K3V3 \u00b7 dense-rate LUT-B", sp.denseRate, max, p.key === "uniform" ? "#a33d2f" : "#8a6a14",
-      { valText: fmtTok(sp.denseRate) + " \u00b7 " + fmtX(sp.denseRate / sp.h100) });
+    barRow(host, "K3V3 \u00b7 LUT-B @ 10%", sp.p10, max, "#b3ac94",
+      { valText: fmtTok(sp.p10) + " \u00b7 " + fmtX(sp.p10 / sp.h100) });
+    barRow(host, "K3V3 \u00b7 LUT-B @ 25%", sp.p25, max, "#8f8978",
+      { valText: fmtTok(sp.p25) + " \u00b7 " + fmtX(sp.p25 / sp.h100) });
+    barRow(host, "K3V3 \u00b7 LUT-B @ 50%", sp.p50, max, "#a97f19",
+      { valText: fmtTok(sp.p50) + " \u00b7 " + fmtX(sp.p50 / sp.h100) });
+    barRow(host, "K3V3 \u00b7 dense endpoint", sp.denseEndpoint, max,
+      p.key === "uniform" ? "#a33d2f" : "#8a6a14",
+      { valText: fmtTok(sp.denseEndpoint) + " \u00b7 " + fmtX(sp.denseEndpoint / sp.h100) });
   } else if (p.kind === "bf16") {
     barRow(host, "Rubin \u00b7 K3V3", 0, max, "", { ghost: "N/A" });
   } else {
@@ -1647,10 +1669,10 @@ function renderCaption() {
   const ctxL = CTX_LABEL[hx.ctx];
   let html;
   if (p.kind === "k3v3") {
-    html = p.desc + " At " + ctxL + ", a half-dense-rate LUT-B sensitivity case gives <b>" + fmtTok(sp.halfRate) +
-      "</b> attention tok/s (" + fmtX(sp.halfRate / sp.h100) + " H100 BF16), while a LUT-B mode matching Rubin's " +
-      "public 17.5-PFLOP/s dense FP8 rate gives <b>" + fmtTok(sp.denseRate) + "</b> (" +
-      fmtX(sp.denseRate / sp.h100) + "). These are modeling endpoints, not a prediction interval.";
+    html = p.desc + " At " + ctxL + ", explicit 10% / 25% / 50%-of-dense LUT-B sensitivity endpoints give <b>" +
+      fmtTok(sp.p10)+" / "+fmtTok(sp.p25)+" / "+fmtTok(sp.p50) +
+      "</b> attention tok/s. The dense-rate endpoint is <b>"+fmtTok(sp.denseEndpoint)+
+      "</b>. None is an expected efficiency or prediction; LUT-B throughput is unpublished.";
     if (p.key === "uniform") {
       html += " <b>Same storage and the same modeled speed scenarios \u2014 but KL\u2085\u2080 explodes to " +
         p.kl.toFixed(2) + " nats/token (PPL \u00d7" + (p.ppl / BF16_PPL).toFixed(0) +
