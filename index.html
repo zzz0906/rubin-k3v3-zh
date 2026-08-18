@@ -560,9 +560,9 @@ effective         = 3.125 bit/value</code></pre>
         <tr><td>BF16 W + BF16 A</td><td class="num"><strong>8.482 / 0.00000</strong></td><td class="num"><strong>5.771 / 0.00000</strong></td><td class="num"><strong>4.124 / 0.00000</strong></td></tr>
         <tr><td>BF16 W + A8</td><td class="num">8.547 / 0.00504</td><td class="num">5.786 / 0.02114</td><td class="num">4.115 / 0.01756</td></tr>
         <tr><td>H64 + inter-LM-GPTQ round 1 (ours) + K64 SFB + global</td><td class="num">10.671 / <strong>0.25061</strong></td><td class="num"><strong>6.954</strong> / 0.38775</td><td class="num">5.183 / 0.26777</td></tr>
-        <tr><td>Random-H64 + K64 LUT-GPTQ + two-K32 SFB + global</td><td class="num">10.643 / 0.25499</td><td class="num">7.067 / 0.37087</td><td class="num"><strong>5.032 / 0.21195</strong></td></tr>
-        <tr><td>Random-H64 + K64 LUT-GPTQ + K64 SFB + global</td><td class="num">10.899 / 0.26852</td><td class="num">7.169 / <strong>0.27815</strong></td><td class="num">5.078 / 0.23976</td></tr>
-        <tr><td>Random-H64 + K64 LUT-GPTQ [4,7] (two-K32, no global)</td><td class="num"><strong>10.504</strong> / 0.28601</td><td class="num">7.034 / <strong>0.37273</strong></td><td class="num"><strong>5.076 / 0.20916</strong></td></tr>
+        <tr><td>H64 + K64 LUT-GPTQ + two-K32 SFB + global</td><td class="num">10.643 / 0.25499</td><td class="num">7.067 / 0.37087</td><td class="num"><strong>5.032 / 0.21195</strong></td></tr>
+        <tr><td>H64 + K64 LUT-GPTQ + K64 SFB + global</td><td class="num">10.899 / 0.26852</td><td class="num">7.169 / <strong>0.27815</strong></td><td class="num">5.078 / 0.23976</td></tr>
+        <tr><td>H64 + K64 LUT-GPTQ [4,7] (two-K32, no global)</td><td class="num"><strong>10.504</strong> / 0.28601</td><td class="num">7.034 / <strong>0.37273</strong></td><td class="num"><strong>5.076 / 0.20916</strong></td></tr>
         <tr><td>GPTQ + H64 + RMS²-weighted Lloyd–Max + two-K32 SFB + global</td><td class="num">10.803 / 0.28762</td><td class="num">7.082 / 0.34986</td><td class="num">5.032 / 0.21195†</td></tr>
         <tr><td>GPTQ + H64 + RMS²-weighted Lloyd–Max [1,2,4,7] (two-K32, no global)</td><td class="num">10.607 / 0.31554</td><td class="num">7.043 / 0.34431</td><td class="num">5.076 / 0.20916†</td></tr>
         <tr><td>Activation-RMS²-weighted Lloyd-Max (ours) [1,2] (two-K32, no global)</td><td class="num">11.613 / 0.36921</td><td class="num">7.706 / 0.55274</td><td class="num">6.474 / 0.42795</td></tr>
@@ -585,7 +585,7 @@ effective         = 3.125 bit/value</code></pre>
       最后两行来自我们的 iteration-sweep 研究。<strong>H64 + inter-LM-GPTQ (round 1)</strong> 在 native H64
       配方上做一轮离线 Hessian 加权 Lloyd codebook M-step 与 GPTQ 重跑的交替；runtime contract 与 native H64
       行完全一致，却在 Qwen 所有 context 上都有改进，拿下 native Qwen 128K 最优 KL₅₀（0.25061）与 Gemma PPL
-      整列最优。这个 sweep 同时校定了误差条：仅随机 H64 符号种子一项就使 KL₅₀ 波动 σ ≈ 0.009（无加权
+      整列最优。这个 sweep 同时校定了误差条：仅 H64 符号种子一项就使 KL₅₀ 波动 σ ≈ 0.009（无加权
       codebook）到 0.028（RMS² 加权）；按种子配对后只有校准规模（512→4096 tokens，−0.022 KL₅₀）和一轮交替
       （−0.009）是真实效应——RMS² 加权本身不是，这就是加权 two-K32 行与无加权版互有胜负的原因。† 两条加权行的 MiniMax 单元格都与对应 H64 行共享：routed pipeline 的 codebook 本来就始终是 RMS² 加权的。
       MiniMax 的交替 rerun 测出了相反方向——round 1 在所有 context 上都比 round 0 差（128K KL₅₀ 0.23976 →
@@ -609,7 +609,7 @@ two K32    = 216 B = 3.375 bit/W，algorithm oracle only（not native LUT-B）</
       <tbody>
         <tr><td>LM / RMS² / GPTQ / SqueezeLLM</td><td>Fit tile-local LUT and pack indices/scales</td><td>只有 K64-contract rerun 才是 native；原始 rows 是 two-K32 oracle</td></tr>
         <tr><td>Folded AWQ</td><td>Fold scale into RMSNorm and consumer weights, then fit LUT</td><td>None for supported fold groups</td></tr>
-        <tr><td>Random-H64 + GPTQ</td><td>Rotate every K64 weight block before fitting</td><td>Matching signed H64 on each A K64 block</td></tr>
+        <tr><td>H64 + GPTQ</td><td>Rotate every K64 weight block before fitting</td><td>Matching signed H64 on each A K64 block</td></tr>
         <tr><td>MiniMax routed methods</td><td>Apply the same K64×N8 format to routed experts</td><td>Current simulation changes routed gate input only</td></tr>
       </tbody>
     </table></div>
@@ -1169,7 +1169,7 @@ function hideTip() { tip.style.display = "none"; }
 const W_METHODS = {
   bf16:    { label: "BF16", full: "BF16 Weight + BF16 Activation Baseline", color: "#4a463c", bits: 16, about: "No weight or activation quantization; this is the native accuracy reference.", kernel: "Dense BF16 GEMM with no LUT, SFB, rotation, or global quantization scale." },
   a8:      { label: "A8-only", full: "BF16 Weight + MXFP8 Activation-Only QDQ", color: "#6e6a5c", bits: 16, about: "Weights remain BF16; activations are quantize-dequantized to E4M3 with one UE8M0 scale per K32 block.", kernel: "Dense BF16 weight GEMM after online A quantization; no LUT-B weight path." },
-  h64:     { label: "H64 · K32 oracle", full: "Hadamard64 + GPTQ + 2K32 Quality Oracle", color: "#3e6b5f", bits: 3.375, nativeLutb: false, about: "A fixed random signed Hadamard64 rotation spreads weight outliers, then K64 block-diagonal LUT-GPTQ applies activation-Hessian error compensation.", kernel: "Non-native oracle: PTX 9.4 LUT-B fixes compressed B at K64 and mxf8f6f4 exposes no scale_vec::2X contract for two independently addressed K32 B scales." },
+  h64:     { label: "H64 · K32 oracle", full: "Hadamard64 + GPTQ + 2K32 Quality Oracle", color: "#3e6b5f", bits: 3.375, nativeLutb: false, about: "A fixed signed Hadamard64 rotation spreads weight outliers, then K64 block-diagonal LUT-GPTQ applies activation-Hessian error compensation.", kernel: "Non-native oracle: PTX 9.4 LUT-B fixes compressed B at K64 and mxf8f6f4 exposes no scale_vec::2X contract for two independently addressed K32 B scales." },
   h64_k64g:{ label: "H64 · K64+G", full: "Hadamard64 + GPTQ + K64 + Global Scale", color: "#2f7f6c", bits: 3.25, global: true, nativeLutb: true, about: "The signed Hadamard64 and K64 block-diagonal LUT-GPTQ recipe under the native one-K64 scale schedule.", kernel: "Native candidate: one K64 LUT-B MMA, 8 scale_B=1×N UE8M0 factors per tile, one folded tensor-global FP32 scale, and signed H64 on A." },
   h64_k32g:{ label: "H64 · 2K32+G oracle", full: "Hadamard64 + GPTQ + 2K32 + Global Scale Quality Oracle", color: "#4d8f68", bits: 3.375, global: true, nativeLutb: false, about: "Signed Hadamard64 first spreads outliers; K64 block-diagonal LUT-GPTQ then compensates quantization error using the calibrated activation Hessian.", kernel: "Non-native oracle with 16 independently fitted K32-local factors; no Rubin LUT-B throughput is assigned." },
   h64rms_k32: { label: "H64+RMS² · K32 oracle", full: "Hadamard64 + GPTQ + Activation-RMS²-Weighted Lloyd–Max + 2K32 Quality Oracle", color: "#7c8f3a", bits: 3.375, nativeLutb: false, about: "H64 + LUT-GPTQ pipeline，Lloyd–Max codebook 按校准 activation RMS² 加权；按种子配对的分析显示这项加权对 KL 的影响在一个 rotation-seed sigma 之内。", kernel: "非原生 oracle，两组 K32 scale。MiniMax 单元格与 H64 · K32 oracle 共享：routed pipeline 的 codebook 本来就始终是 RMS² 加权的。" },
