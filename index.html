@@ -582,9 +582,34 @@ effective         = 3.125 bit/value</code></pre>
       one-K64 rows 中，H64 在本 sweep 里优于 RMS²，同时仍需在 A 上执行 matching runtime transform。
     </p>
     <p>
-      最后两行来自我们的 iteration-sweep 研究。<strong>H64 + inter-LM-GPTQ (round 1)</strong> 在 native H64
-      配方上做一轮离线 Hessian 加权 Lloyd codebook M-step 与 GPTQ 重跑的交替；runtime contract 与 native H64
-      行完全一致，却在 Qwen 所有 context 上都有改进，拿下 native Qwen 128K 最优 KL₅₀（0.25061）与 Gemma PPL
+      <strong>Production KL 交叉验证。</strong>所有 MiniMax 行都额外用
+      <a href="https://github.com/togethercomputer/kl-probe">kl-probe</a><span class="cite"><a href="#ref-klprobe">[11]</a></span>
+      的 production truncated-KL 指标打了分，且是在真实 SGLang serving stack 里跑的专用 rerun 批次：KL(ref‖cand) 在 teacher top-50
+      support 上重归一化，未覆盖的 teacher 尾部单独上报、不进求和。两个指标在这里所有重要排序上一致——例如最优 native MiniMax 行
+      （RMS² + K64 SFB + global）在 128K 读作 0.170 KL₅₀ / 0.181 prod-KL，BF16+A8 逐位复现——只有一个有启发性的例外：NF3/uniform
+      这类塌缩基线读作 ≈5.2 prod-KL 对 ≈13.4 KL₅₀，因为在 teacher support 上重归一化会掩盖 candidate 的 off-support 质量塌缩，
+      而 KL₅₀ 的显式尾部桶能捕捉它。所以对塌缩模型 prod-KL 必须和 PPL 一起读；完整分 context 列见 PLAN 表格。
+    </p>
+
+    <h3>3.2 迭代方法：inter-LM-GPTQ</h3>
+    <div class="callout">
+      <strong>循环本身。</strong>inter-LM-GPTQ 是我们的离线 quantizer–corrector 循环，把本研究已经用到的两个经典组件拼在一起。
+      GPTQ<span class="cite"><a href="#ref-gptq">[4]</a></span> 是<em>corrector</em>：固定 codebook 不动，按 Hessian 排序逐列量化权重，并把每列的
+      rounding error 通过校准 Hessian 传播进还没量化的列。Lloyd–Max<span class="cite"><a href="#ref-max">[1]</a><a href="#ref-lloyd">[2]</a></span>
+      是<em>quantizer 设计器</em>：给定权重，它的 M-step 重新拟合 8 项 E4M3 codebook（可选用逐列 activation RMS²、即对角 Hessian 重要性加权）。
+      两者互相看不到对方的输出，于是我们让它们交替：round 0 先拟合 codebook 并跑一遍 GPTQ；之后每一轮都在 GPTQ 实际产出的
+      误差补偿权重上重拟 codebook，再用新 codebook 重跑 GPTQ。全部发生在离线——每一轮输出的都是同样的 3-bit indices、E4M3 LUT、
+      UE8M0 SFB 和折叠的 global scale，Rubin runtime contract 逐字节不变。
+    </div>
+    <p>
+      <strong>它收敛吗？收敛有用吗？</strong>这个循环确实收敛：Hessian 加权的重构目标单调下降（plain 变体 −22.7%）并停在不动点。
+      但 raw per-layer MSE 几乎不动、且个别层双向互换，所以终端指标 KL₅₀ 对轮数并不单调——层内重构和端到端 KL 是两个目标，
+      而且每次 GPTQ 重跑都会重新注入 Hessian 估计噪声。实践上，交替是一个廉价的 held-out 选择旋钮：dense 模型上一轮有小而
+      种子一致的增益（4096 校准 tokens 下配对均值 −0.009 KL₅₀）；Hessian 饥饿的 MoE routed experts 上每一轮都变差，应保持关闭。
+    </p>
+    <p>
+      §3.1 表格里有三行来自这个 sweep：round-1 交替行与两条 GPTQ + H64 + RMS² 加权行。<strong>H64 + inter-LM-GPTQ (round 1)</strong>
+      的 runtime contract 与 native H64 行完全一致，却在 Qwen 所有 context 上都有改进，拿下 native Qwen 128K 最优 KL₅₀（0.25061）与 Gemma PPL
       整列最优。这个 sweep 同时校定了误差条：仅 H64 符号种子一项就使 KL₅₀ 波动 σ ≈ 0.009（无加权
       codebook）到 0.028（RMS² 加权）；按种子配对后只有校准规模（512→4096 tokens，−0.022 KL₅₀）和一轮交替
       （−0.009）是真实效应——RMS² 加权本身不是，这就是加权 two-K32 行与无加权版互有胜负的原因。† 两条加权行的 MiniMax 单元格都与对应 H64 行共享：routed pipeline 的 codebook 本来就始终是 RMS² 加权的。
@@ -596,29 +621,8 @@ effective         = 3.125 bit/value</code></pre>
       KL₅₀——比 GPTQ 修正的 scalar LUT 差约 2×——说明没有 fine-tuning 阶段的 additive VQ 在这个硬件
       contract 下不具竞争力。
     </p>
-    <div class="callout">
-      <strong>单独介绍一下这个交替方法。</strong>inter-LM-GPTQ 是我们的离线 quantizer–corrector 循环，把本研究已经用到的两个经典组件拼在一起。
-      GPTQ<span class="cite"><a href="#ref-gptq">[4]</a></span> 是<em>corrector</em>：固定 codebook 不动，按 Hessian 排序逐列量化权重，并把每列的
-      rounding error 通过校准 Hessian 传播进还没量化的列。Lloyd–Max<span class="cite"><a href="#ref-max">[1]</a><a href="#ref-lloyd">[2]</a></span>
-      是<em>quantizer 设计器</em>：给定权重，它的 M-step 重新拟合 8 项 E4M3 codebook（可选用逐列 activation RMS²、即对角 Hessian 重要性加权）。
-      两者互相看不到对方的输出，于是我们让它们交替：round 0 先拟合 codebook 并跑一遍 GPTQ；之后每一轮都在 GPTQ 实际产出的
-      误差补偿权重上重拟 codebook，再用新 codebook 重跑 GPTQ。全部发生在离线——每一轮输出的都是同样的 3-bit indices、E4M3 LUT、
-      UE8M0 SFB 和折叠的 global scale，Rubin runtime contract 逐字节不变。sweep 的结论：这个循环确实收敛——Hessian 加权的重构目标
-      单调下降（plain 变体 −22.7%）并停在不动点——但 raw per-layer MSE 几乎不动、且个别层双向互换，所以终端指标 KL₅₀ 对轮数并不单调：
-      层内重构和端到端 KL 是两个目标，而且每次 GPTQ 重跑都会重新注入 Hessian 估计噪声。实践上，交替是一个廉价的 held-out 选择旋钮：
-      dense 模型上一轮有小而种子一致的增益（4096 校准 tokens 下配对均值 −0.009 KL₅₀）；Hessian 饥饿的 MoE routed experts 上每一轮都变差，应保持关闭。
-    </div>
-    <p>
-      <strong>Production KL 交叉验证。</strong>所有 MiniMax 行都额外用
-      <a href="https://github.com/togethercomputer/kl-probe">kl-probe</a><span class="cite"><a href="#ref-klprobe">[11]</a></span>
-      的 production truncated-KL 指标打了分，且是在真实 SGLang serving stack 里跑的专用 rerun 批次：KL(ref‖cand) 在 teacher top-50
-      support 上重归一化，未覆盖的 teacher 尾部单独上报、不进求和。两个指标在这里所有重要排序上一致——例如最优 native MiniMax 行
-      （RMS² + K64 SFB + global）在 128K 读作 0.170 KL₅₀ / 0.181 prod-KL，BF16+A8 逐位复现——只有一个有启发性的例外：NF3/uniform
-      这类塌缩基线读作 ≈5.2 prod-KL 对 ≈13.4 KL₅₀，因为在 teacher support 上重归一化会掩盖 candidate 的 off-support 质量塌缩，
-      而 KL₅₀ 的显式尾部桶能捕捉它。所以对塌缩模型 prod-KL 必须和 PPL 一起读；完整分 context 列见 PLAN 表格。
-    </p>
 
-    <h3>3.2 Kernel Organization</h3>
+    <h3>3.3 Kernel Organization</h3>
 <pre><code>A[M,K] × B[K,N], where B = Wᵀ
 one B tile = W[n:n+8, k:k+64]
 reference  = 192 B indices + 8 B LUT             = 200 B = 3.125 bit/W
@@ -635,7 +639,7 @@ two K32    = 216 B = 3.375 bit/W，algorithm oracle only（not native LUT-B）</
       </tbody>
     </table></div>
 
-    <h3>3.3 Simulation Estimate</h3>
+    <h3>3.4 Simulation Estimate</h3>
     <div class="table-wrap"><table class="data">
       <thead><tr><th>Native Rubin Weight Contract</th><th class="num">Bits/W</th><th class="num">Byte-only vs H100 BF16</th><th class="num">Byte-only vs B200 BF16</th><th class="num">Required LUT-B Rate</th></tr></thead>
       <tbody>
