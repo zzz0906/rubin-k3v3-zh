@@ -268,8 +268,8 @@
     <a href="#weight-explorer">图 1 · Weight</a>
     <a href="#kv-explorer">图 2 · KV</a>
     <a href="#tldr">TL;DR</a>
-    <a href="#sec1">1&ensp;Rubin LUT-B</a>
-    <a href="#sec2">2&ensp;Hardware contract</a>
+    <a href="#sec1">1&ensp;Introduction</a>
+    <a href="#sec2">2&ensp;LUT-B contract</a>
     <a href="#weight">3&ensp;Weight W3A8</a>
     <a href="#activation">4&ensp;Activation</a>
     <a href="#kv">5&ensp;KV Cache</a>
@@ -495,19 +495,23 @@ effective         = 3.125 bit/value</code></pre>
     </p>
 
     <h3>2.2 CUDA 13.4 compile test 告诉了我们什么？</h3>
-    <p>我们在 clean K8s container 中 compile PTX，并检查生成的 SASS：</p>
+    <p>
+      我们在 clean K8s container 中 compile PTX，并检查生成的 SASS。之后的 PTX 9.4 复审把 probes 从
+      <code>sm_107a</code> 重定向到文档规定的 <code>sm_107f</code> K64 形式；SASS 证据早于这次修正的行会注明，
+      在 rerun 落地之前，这些行的合法性结论以 ISA 文本为准：
+    </p>
     <div class="table-wrap"><table class="data">
       <thead><tr><th>Probe</th><th>Compatibility</th><th>Compiler / SASS Evidence</th><th>Meaning</th></tr></thead>
       <tbody>
         <tr><td><code>sm_107f</code> family target</td><td><span class="faint">REQUIRED</span></td><td>Compile probe updated; rerun pending</td><td>Prior <code>sm_107a</code> syntax pass did not validate documented K64 form</td></tr>
         <tr><td>UE5M3 conversion</td><td><span class="ok">SUPPORTED</span></td><td><code>F2FP.SATFINITE.UE5M3</code></td><td>The UE5M3 datatype itself exists</td></tr>
-        <tr><td>Dense E4M3 A × LUT-B E4M3 B</td><td><span class="ok">SUPPORTED</span></td><td><code>UTCQMMA.LUTB</code></td><td>The basic QK/PV mapping is legal</td></tr>
-        <tr><td>MXFP8 block32 A × LUT-B B</td><td><span class="ok">SUPPORTED</span></td><td><code>UTCQMMA.LUTB</code> + scale TMEM</td><td>Scaled Q/P can be fused</td></tr>
+        <tr><td>Dense E4M3 A × LUT-B E4M3 B</td><td><span class="ok">SUPPORTED</span></td><td>PTX 9.4 form; pre-fix <code>UTCQMMA.LUTB</code> SASS, <code>sm_107f</code> rerun pending</td><td>The basic QK/PV mapping is legal</td></tr>
+        <tr><td>MXFP8 block32 A × LUT-B B</td><td><span class="ok">SUPPORTED</span></td><td>PTX 9.4 form; pre-fix SASS + scale TMEM, rerun pending</td><td>Scaled Q/P can be fused</td></tr>
         <tr><td>Two independent K32 B scales</td><td><span class="no">NOT NATIVE</span></td><td>PTX Tables 70–71</td><td><code>mxf8f6f4</code> 只暴露 <code>scale_vec::1X</code></td></tr>
         <tr><td>LUT-B full-tile throughput</td><td><span class="faint">UNKNOWN</span></td><td>No PTX/spec value</td><td>17.5P dense FP8 不是 LUT-B rate</td></tr>
-        <tr><td>LUT-B collector B reuse</td><td><span class="ok">SUPPORTED</span></td><td><code>B_KEEP</code> → <code>B_REUSE</code></td><td>One K/V tile can be reused across GQA heads</td></tr>
-        <tr><td>Sparse A × ordinary B</td><td><span class="ok">SUPPORTED</span></td><td><code>UTCQMMA</code> control</td><td>Sparse-A MMA itself exists</td></tr>
-        <tr><td>Sparse A × LUT-B B</td><td><span class="no">UNSUPPORTED</span></td><td><code>ptxas</code> rejects <code>mma.sp...lut::b</code></td><td>Sparse P cannot be combined with LUT-B V</td></tr>
+        <tr><td>LUT-B collector B reuse</td><td><span class="ok">SUPPORTED</span></td><td>PTX collector fill/use/lastuse semantics</td><td>One K/V tile can be reused across GQA heads; reuse is opportunistic and may reload</td></tr>
+        <tr><td>Sparse A × ordinary B</td><td><span class="ok">SUPPORTED</span></td><td>PTX-defined sparse-A MMA; pre-fix <code>UTCQMMA</code> SASS</td><td>Sparse-A MMA itself exists</td></tr>
+        <tr><td>Sparse A × LUT-B B</td><td><span class="no">UNSUPPORTED</span></td><td>No such ISA form; <code>ptxas</code> rejects, rerun pending</td><td>Sparse P cannot be combined with LUT-B V</td></tr>
         <tr><td>MXFP8 + UE5M3 scale + LUT-B</td><td><span class="no">UNSUPPORTED</span></td><td>PTX 9.4 Table 71</td><td>The FP8 scale must use UE8M0</td></tr>
         <tr><td>Transposed LUT-B B</td><td><span class="no">UNSUPPORTED</span></td><td>PTX 9.4 restriction</td><td>K must be stored physically as Kᵀ</td></tr>
       </tbody>
@@ -658,7 +662,7 @@ two K32    = 216 B = 3.375 bit/W，algorithm oracle only（not native LUT-B）</
     </table></div>
     <p>
       32.33× 只是最右侧 byte ceiling。达到它要求 LUT-B 先持续提供 13.86 PFLOP/s，也就是 Rubin dense FP8
-      peak 的约 79.2%。我的 40–70% engineering band 更低：integrated lookup 应明显优于 software dequant，
+      peak 的约 79.2%。我们的 40–70% engineering band 更低：integrated lookup 应明显优于 software dequant，
       但 48B-to-24B descriptor fetch、TMEM LUT staging 与 collector dependency 又应弱于普通 dense FP8。
       Two-K32 oracle 不分配任何 speed estimate。
     </p>
@@ -907,7 +911,8 @@ two K32    = 216 B = 3.375 bit/W，algorithm oracle only（not native LUT-B）</
     <p>
       先看单 GPU hardware。H100 和 B200 可以作为 bandwidth baseline，但它们没有 SM107 的
       <code>decompress::lut::b</code>；只有 Rubin 能原生执行本文的 K3V3 LUT-B path。
-      <a href="#kv-explorer">图 2</a> 的速度面板对应本节推导的 sensitivity endpoints。
+      <a href="#kv-explorer">图 2</a> 的速度面板显示 40/55/70% data-path guess 加上 100% dense endpoint；
+      完整的 10/25/50/100% 敏感度行在下文表格里。
     </p>
     <div class="table-wrap"><table class="data">
       <thead><tr><th>GPU</th><th>Memory</th><th class="num">Capacity</th><th class="num">HBM bandwidth</th><th class="num">Dense FP8 ceiling</th><th>Native LUT-B</th></tr></thead>
@@ -921,8 +926,9 @@ two K32    = 216 B = 3.375 bit/W，algorithm oracle only（not native LUT-B）</
       H100 数据来自 <a href="https://www.nvidia.com/en-us/data-center/h100/">NVIDIA H100 specs</a>；B200 使用
       <a href="https://docs.nvidia.com/enterprise-reference-architectures/hgx-ai-factory/latest/components.html">NVIDIA HGX component specs</a>
       的 180 GB / up to 8 TB/s，以及公开 4.5 PFLOP/s dense FP8。NVIDIA 把 Rubin 的 17.5 PFLOP/s FP8/FP6
-      数字列为 dense specification。不过 NVIDIA 没有单独公开 <code>decompress::lut::b</code> throughput，
-      因此本文只给 10%/25%/50%/100%-of-dense sensitivity endpoints；它们不是 expected efficiency。
+      数字列为 dense specification——之前把它当 sparse 减半是错误的。不过 NVIDIA 没有单独公开
+      <code>decompress::lut::b</code> throughput，因此 17.5P dense rate 只是一个 sensitivity endpoint，
+      不是实测 LUT-B rate。
     </p>
     <p>
       Qwen3-4B-Thinking-2507 有 36 layers、32 Q heads、8 KV heads、head dim 128。每个 decode token 的
@@ -942,11 +948,16 @@ two K32    = 216 B = 3.375 bit/W，algorithm oracle only（not native LUT-B）</
     <p>
       这里 TFLOP/s 随 context 不变，是因为 BF16 arithmetic intensity 固定；token/s 会随 context 变长而下降。
     </p>
+    <p>
+      在 1M tokens 下，一条 Qwen3-4B BF16 KV 序列在 36 层上约占 <strong>154.6 GB</strong>；attention-only BF16
+      bandwidth ceiling 分别为 H100 21.7 tok/s、B200 51.7、Rubin 142.3。
+    </p>
 
     <h4>5.3.3 K3V3 Roofline：Compressed Bytes 与 B-only Tile</h4>
     <p>
-      K3V3 加上 BF16 sink/recent 后，8K 的 effective storage 是 3.628 bit/value，32K 是 3.251 bit/value；
-      对应 arithmetic intensity 为 17.64 / 19.69 FLOP/B。
+      K3V3 加上 BF16 sink/recent 后，effective storage 在 8K 是 3.628 bit/value、32K 是 3.251、1M 是 3.129；
+      对应 arithmetic intensity 为 17.64 / 19.69 / 20.45 FLOP/B。1M 时 Qwen3-4B 的 KV footprint 从 154.6 GB
+      降到约 <strong>30.2 GB</strong>。
     </p>
     <div class="table-wrap"><table class="data">
       <thead><tr><th>GPU</th><th class="num">8K Compressed-byte Normalization</th><th class="num">8K tok/s</th><th class="num">32K Compressed-byte Normalization</th><th class="num">32K tok/s</th><th>Native Execution?</th></tr></thead>
@@ -970,7 +981,7 @@ two K32    = 216 B = 3.375 bit/W，algorithm oracle only（not native LUT-B）</
       <code>Q × Kᵀ</code> / <code>P × V</code> 的方向。
     </p>
     <p>
-      有读者向我们指出了最新的 decode kernel，这个观察是对的：
+      在 audit 最新 decode path 时，我们注意到：
       <a href="https://github.com/flashinfer-ai/flashinfer/blob/b1d95851675b8799d623df4d5a7d6eac3254b3ff/flashinfer/cute_dsl/attention/gqa_decode_paged.py#L222-L259">FlashInfer SM100 CuTe GQA decode kernel</a>
       明确设置 <code>mma_tile_m=128</code>；GEMM1 的 A 是 K、B 是 Q，GEMM2 的 A 是 V、B 是 P。它让
       sequence/head-dim 填满 A 的 M 方向，并把 GQA heads × prediction tokens 填进 B 的 N 方向。需要同时区分
@@ -985,12 +996,12 @@ two K32    = 216 B = 3.375 bit/W，algorithm oracle only（not native LUT-B）</
       GQA ratio 是 4，所以一个共享 K/V tile 最多把 4 个 Q heads 打包成 4 行：
     </p>
     <div class="table-wrap"><table class="data">
-      <thead><tr><th>LUT-B Full-Tile Sensitivity</th><th class="num">Optimistic M Occupancy</th><th class="num">Useful Cap</th><th class="num">8K Bound</th><th class="num">32K Bound</th></tr></thead>
+      <thead><tr><th>LUT-B Full-Tile Sensitivity</th><th class="num">Optimistic M Occupancy</th><th class="num">Useful Cap</th><th class="num">8K Bound</th><th class="num">32K Bound</th><th class="num">1M Bound</th></tr></thead>
       <tbody>
-        <tr><td>10% dense FP8：1.75P</td><td class="num">4 / 128 = 3.125%</td><td class="num">54.7 TFLOP/s</td><td class="num">54.7</td><td class="num">54.7</td></tr>
-        <tr><td>25% dense FP8：4.375P</td><td class="num">4 / 128 = 3.125%</td><td class="num">136.7 TFLOP/s</td><td class="num">136.7</td><td class="num">136.7</td></tr>
-        <tr><td>50% dense FP8：8.75P</td><td class="num">4 / 128 = 3.125%</td><td class="num">273.4 TFLOP/s</td><td class="num">273.4</td><td class="num">273.4</td></tr>
-        <tr><td>100% dense endpoint：17.5P</td><td class="num">4 / 128 = 3.125%</td><td class="num">546.9 TFLOP/s</td><td class="num">388.1 HBM-capped</td><td class="num">433.1 HBM-capped</td></tr>
+        <tr><td>10% dense FP8：1.75P</td><td class="num">4 / 128 = 3.125%</td><td class="num">54.7 TFLOP/s</td><td class="num">54.7</td><td class="num">54.7</td><td class="num">54.7</td></tr>
+        <tr><td>25% dense FP8：4.375P</td><td class="num">4 / 128 = 3.125%</td><td class="num">136.7 TFLOP/s</td><td class="num">136.7</td><td class="num">136.7</td><td class="num">136.7</td></tr>
+        <tr><td>50% dense FP8：8.75P</td><td class="num">4 / 128 = 3.125%</td><td class="num">273.4 TFLOP/s</td><td class="num">273.4</td><td class="num">273.4</td><td class="num">273.4</td></tr>
+        <tr><td>100% dense endpoint：17.5P</td><td class="num">4 / 128 = 3.125%</td><td class="num">546.9 TFLOP/s</td><td class="num">388.1 HBM-capped</td><td class="num">433.1 HBM-capped</td><td class="num">450.0 HBM-capped</td></tr>
       </tbody>
     </table></div>
     <p>
@@ -1078,7 +1089,7 @@ two K32    = 216 B = 3.375 bit/W，algorithm oracle only（not native LUT-B）</
     </ul>
     <h3>7.2 Performance</h3>
     <ul>
-      <li><strong>Weight mapping 最干净，但旧 headline 只是 byte ceiling。</strong>我的 data-path guess
+      <li><strong>Weight mapping 最干净，但旧 headline 只是 byte ceiling。</strong>我们的 data-path guess
         把 native K64 放在 H100 BF16 weight-only 的 16.32–28.57×，中心为 22.45×；32.33× ceiling 仍要求
         dense FP8 的 79.2%，且尚未计入 non-weight overhead。</li>
       <li><strong>KV 随 context 增长节省更多 bytes，但 decode shape 决定 utilization。</strong>GQA4
