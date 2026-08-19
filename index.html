@@ -577,8 +577,8 @@ effective         = 3.125 bit/value</code></pre>
         <tr><td>Folded AWQ + Lloyd-Max [1,2,5]</td><td class="num">12.666 / 0.45302</td><td class="num">10.719 / 0.83232</td><td class="num">5.404 / 0.29059</td></tr>
         <tr><td>Lloyd-Max W3A8 [1,2] (MiniMax: routed-expert w13/w2 W3 only; A remains BF16)</td><td class="num">12.703 / 0.48603</td><td class="num">180.144 / 3.67195</td><td class="num">7.488 / 0.58320</td></tr>
         <tr><td>Dense-only SqueezeLLM [6]</td><td class="num">13.332 / 0.49994</td><td class="num">11.180 / 1.02137</td><td class="num">6.513 / 0.43720</td></tr>
-        <tr><td>Zero-aware NF3 (normal-float adaptation) [8]</td><td class="num">29.646 / 1.26669</td><td class="num">4358.944 / 6.57245</td><td class="num">2032820.392 / 13.30284</td></tr>
-        <tr><td>Uniform scalar quantization [9]</td><td class="num">162.126 / 2.89007</td><td class="num">19733.351 / 7.98959</td><td class="num">535932.314 / 12.15861</td></tr>
+        <tr><td>Zero-aware NF3 (normal-float adaptation)</td><td class="num">29.646 / 1.26669</td><td class="num">4358.944 / 6.57245</td><td class="num">2032820.392 / 13.30284</td></tr>
+        <tr><td>Uniform scalar quantization [8]</td><td class="num">162.126 / 2.89007</td><td class="num">19733.351 / 7.98959</td><td class="num">535932.314 / 12.15861</td></tr>
       </tbody>
     </table></div>
     <p>
@@ -586,9 +586,8 @@ effective         = 3.125 bit/value</code></pre>
       one-K64 rows 中，H64 在本 sweep 里优于 RMS²，同时仍需在 A 上执行 matching runtime transform。
     </p>
     <p>
-      <strong>Production KL 交叉验证。</strong>所有 MiniMax 行都额外用
-      <a href="https://github.com/togethercomputer/kl-probe">kl-probe</a><span class="cite"><a href="#ref-klprobe">[11]</a></span>
-      的 production truncated-KL 指标打了分，且是在真实 SGLang serving stack 里跑的专用 rerun 批次：KL(ref‖cand) 在 teacher top-50
+      <strong>Production KL 交叉验证。</strong>所有 MiniMax 行都额外用我们的 production truncated-KL
+      指标（prod-KL）打了分，且是在真实 SGLang serving stack 里跑的专用 rerun 批次：KL(ref‖cand) 在 teacher top-50
       support 上重归一化，未覆盖的 teacher 尾部单独上报、不进求和。两个指标在这里所有重要排序上一致——例如最优 native MiniMax 行
       （RMS² + K64 SFB + global）在 128K 读作 0.170 KL₅₀ / 0.181 prod-KL，BF16+A8 逐位复现——只有一个有启发性的例外：NF3/uniform
       这类塌缩基线读作 ≈5.2 prod-KL 对 ≈13.4 KL₅₀，因为在 teacher support 上重归一化会掩盖 candidate 的 off-support 质量塌缩，
@@ -620,7 +619,7 @@ effective         = 3.125 bit/value</code></pre>
       MiniMax 的交替 rerun 测出了相反方向——rounds 1–4 每一轮在所有 context 上都比 round 0 差（128K KL₅₀
       round 0 为 0.23976，rounds 1–4 为 0.252–0.275）——正是 Hessian 饥饿分析对「每个 expert 只见 ~1/32
       校准 token」的预测，所以 routed experts 不应开交替。Qwen/Gemma 上 rounds 1–4 在种子噪声带内洗牌（逐轮表见 PLAN）；分 context 的最优轮次可达
-      Qwen 64K 10.564 / 0.23425（round 3）。同 bitrate 的紧凑 <strong>AQLM</strong><span class="cite"><a href="#ref-aqlm">[10]</a></span> 复现（additive VQ，M=3、2⁸
+      Qwen 64K 10.564 / 0.23425（round 3）。同 bitrate 的紧凑 <strong>AQLM</strong><span class="cite"><a href="#ref-aqlm">[9]</a></span> 复现（additive VQ，M=3、2⁸
       codes、g=8，无 SGD fine-tune）随交替轮数单调改善，但在 8K 协议上饱和于 16.096 PPL / 0.470
       KL₅₀——比 GPTQ 修正的 scalar LUT 差约 2×——说明没有 fine-tuning 阶段的 additive VQ 在这个硬件
       contract 下不具竞争力。
@@ -1134,10 +1133,8 @@ git checkout zhongzhu/oscar-int3-rubin-simulate</code></pre>
       <li id="ref-awq">J. Lin et al., <a href="https://arxiv.org/abs/2306.00978">“AWQ: Activation-aware Weight Quantization for LLM Compression and Acceleration,”</a> MLSys 2024.</li>
       <li id="ref-squeezellm">S. Kim et al., <a href="https://arxiv.org/abs/2306.07629">“SqueezeLLM: Dense-and-Sparse Quantization,”</a> ICML 2024.</li>
       <li id="ref-quarot">S. Ashkboos et al., <a href="https://arxiv.org/abs/2404.00456">“QuaRot: Outlier-Free 4-Bit Inference in Rotated LLMs,”</a> NeurIPS 2024.</li>
-      <li id="ref-qlora">T. Dettmers et al., <a href="https://arxiv.org/abs/2305.14314">“QLoRA: Efficient Finetuning of Quantized LLMs,”</a> NeurIPS 2023.</li>
       <li id="ref-quant">R. M. Gray and D. L. Neuhoff, <a href="https://doi.org/10.1109/18.720541">“Quantization,”</a> <i>IEEE Transactions on Information Theory</i>, 1998.</li>
       <li id="ref-aqlm">V. Egiazarian et al., <a href="https://arxiv.org/abs/2401.06118">“Extreme Compression of Large Language Models via Additive Quantization,”</a> ICML 2024.</li>
-      <li id="ref-klprobe">Together Computer, <a href="https://github.com/togethercomputer/kl-probe">“kl-probe: truncated-KL probing for served models,”</a> GitHub, 2026.</li>
       <li><a href="https://developer.nvidia.com/blog/inside-nvidia-rubin-gpu-architecture-powering-the-era-of-agentic-ai/">NVIDIA: Inside NVIDIA Rubin GPU Architecture</a></li>
       <li><a href="https://developer.nvidia.com/blog/inside-the-nvidia-rubin-platform-six-new-chips-one-ai-supercomputer/">NVIDIA: Inside the Vera Rubin Platform</a></li>
       <li><a href="https://www.nvidia.com/en-us/data-center/vera-rubin-nvl72/">NVIDIA: Vera Rubin NVL72 specs</a></li>
