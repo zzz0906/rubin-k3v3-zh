@@ -588,9 +588,9 @@ effective         = 3.125 bit/value</code></pre>
       整列最优。这个 sweep 同时校定了误差条：仅 H64 符号种子一项就使 KL₅₀ 波动 σ ≈ 0.009（无加权
       codebook）到 0.028（RMS² 加权）；按种子配对后只有校准规模（512→4096 tokens，−0.022 KL₅₀）和一轮交替
       （−0.009）是真实效应——RMS² 加权本身不是，这就是加权 two-K32 行与无加权版互有胜负的原因。† 两条加权行的 MiniMax 单元格都与对应 H64 行共享：routed pipeline 的 codebook 本来就始终是 RMS² 加权的。
-      MiniMax 的交替 rerun 测出了相反方向——round 1 在所有 context 上都比 round 0 差（128K KL₅₀ 0.23976 →
-      0.26777）——正是 Hessian 饥饿分析对「每个 expert 只见 ~1/32 校准 token」的预测，所以 routed experts
-      不应开交替。Qwen/Gemma 上 rounds 1–4 在种子噪声带内洗牌（逐轮表见 PLAN）；分 context 的最优轮次可达
+      MiniMax 的交替 rerun 测出了相反方向——rounds 1–4 每一轮在所有 context 上都比 round 0 差（128K KL₅₀
+      round 0 为 0.23976，rounds 1–4 为 0.252–0.275）——正是 Hessian 饥饿分析对「每个 expert 只见 ~1/32
+      校准 token」的预测，所以 routed experts 不应开交替。Qwen/Gemma 上 rounds 1–4 在种子噪声带内洗牌（逐轮表见 PLAN）；分 context 的最优轮次可达
       Qwen 64K 10.564 / 0.23425（round 3）。同 bitrate 的紧凑 <strong>AQLM</strong> 复现（additive VQ，M=3、2⁸
       codes、g=8，无 SGD fine-tune）随交替轮数单调改善，但在 8K 协议上饱和于 16.096 PPL / 0.470
       KL₅₀——比 GPTQ 修正的 scalar LUT 差约 2×——说明没有 fine-tuning 阶段的 additive VQ 在这个硬件
