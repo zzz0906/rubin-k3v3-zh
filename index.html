@@ -586,12 +586,17 @@ effective         = 3.125 bit/value</code></pre>
       one-K64 rows 中，H64 在本 sweep 里优于 RMS²，同时仍需在 A 上执行 matching runtime transform。
     </p>
     <p>
-      <strong>Production KL 交叉验证。</strong>所有 MiniMax 行都额外用我们的 production truncated-KL
-      指标（prod-KL）打了分，且是在真实 SGLang serving stack 里跑的专用 rerun 批次：KL(ref‖cand) 在 teacher top-50
-      support 上重归一化，未覆盖的 teacher 尾部单独上报、不进求和。两个指标在这里所有重要排序上一致——例如最优 native MiniMax 行
-      （RMS² + K64 SFB + global）在 128K 读作 0.170 KL₅₀ / 0.181 prod-KL，BF16+A8 逐位复现——只有一个有启发性的例外：NF3/uniform
-      这类塌缩基线读作 ≈5.2 prod-KL 对 ≈13.4 KL₅₀，因为在 teacher support 上重归一化会掩盖 candidate 的 off-support 质量塌缩，
-      而 KL₅₀ 的显式尾部桶能捕捉它。所以对塌缩模型 prod-KL 必须和 PPL 一起读；完整分 context 列见 PLAN 表格。
+      <strong>Production KL 交叉验证。</strong>所有 MiniMax 行都额外按我们的 production truncated-KL
+      协议（prod-KL）打了分，端到端跑在真实 SGLang serving stack 上：先让 native BF16 server 用模型自己的采样设置
+      一次性生成 64 条 HLE 推理 trace，然后每个量化 arm 在完全相同的 718,159 个位置上做 teacher-forcing——覆盖
+      prompt 加 response 的全部位置，在 reference top-40 support 上打分并对缺失 id 做 candidate-floor clamp，
+      未覆盖的 teacher 尾部单独上报、不进求和。这个 probe 自带固定 token 集，所以每个方法只有一个数、不分 context。
+      在这批自生成 trace 上，serving stack 逐位确定——独立的第二个 native pass 恰好读作 0.00000——且 reference
+      top-40 support 只留下 0.65% 未覆盖尾部。粗排序与 WikiText KL₅₀ 一致：RMS² + global-scale 两行领先（two-K32
+      oracle 0.072、native K64 0.077），GPTQ/H64 家族压缩到 0.083–0.090 的窄带（推理位置以高置信 token 为主），
+      AWQ 居中，unweighted Lloyd-Max 变体靠后。一个有启发性的例外仍在：NF3/uniform 这类塌缩基线读作 ≈7.3/5.4
+      prod-KL 对 ≈13.3/12.2 KL₅₀，因为在 teacher support 上重归一化会掩盖 candidate 的 off-support 质量塌缩，
+      而 KL₅₀ 的显式尾部桶能捕捉它。所以对塌缩模型 prod-KL 必须和 PPL 一起读；完整列见 PLAN 表格。
     </p>
 
     <h3>3.2 迭代方法：inter-LM-GPTQ</h3>
