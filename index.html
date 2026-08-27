@@ -268,8 +268,8 @@
     <a href="#weight-explorer">图 1 · Weight</a>
     <a href="#kv-explorer">图 2 · KV</a>
     <a href="#tldr">TL;DR</a>
-    <a href="#sec1">1&ensp;Introduction</a>
-    <a href="#sec2">2&ensp;LUT-B contract</a>
+    <a href="#sec1">1&ensp;Rubin LUT-B</a>
+    <a href="#sec2">2&ensp;Hardware contract</a>
     <a href="#weight">3&ensp;Weight W3A8</a>
     <a href="#activation">4&ensp;Activation</a>
     <a href="#kv">5&ensp;KV Cache</a>
@@ -295,6 +295,7 @@
       <div class="ctrl"><div class="ctrl-label">Model</div><div class="seg" id="wSegModel"></div></div>
       <div class="ctrl"><div class="ctrl-label">Context</div><div class="seg" id="wSegCtx"></div></div>
       <div class="ctrl"><div class="ctrl-label">Method</div><select class="method-select" id="wMethodSelect" aria-label="Weight method"></select></div>
+      <div class="ctrl"><div class="ctrl-label">数据来源</div><div class="seg" id="wSegSrc"></div></div>
       <div class="ctrl"><div class="ctrl-label">KL chart view</div><div class="seg" id="wSegView"></div></div>
     </div>
     <div class="duo">
@@ -320,8 +321,11 @@
     <div class="fig-note">
       <b>Contract correction。</b>Linear weight 是 W[N,K]，B=Wᵀ[K,N]。CUDA reference tile 是 512 indices +
       一个 E4M3 LUT，即 3.125 bits/weight。可选 native block scaling 每个 N row 增加一个 UE8M0 SFB
-      （8 bytes/tile），得到 3.25 bits/weight。PTX 9.4 的 MXFP8 LUT-B 只暴露这个 K64
-      <code>scale_B=1×N</code> path；所有 two-K32/16-factor 结果现在都标为 non-native quality oracle。
+      （8 bytes/tile），得到 3.25 bits/weight —— 这是本文自始至终建模的 layout。对 <code>block32</code>
+      的编译加运行探测显示，指令实际提供的是每条 MMA <em>两个</em> UE8M0 因子（k&lt;32 与 k≥32 各一个），
+      跨所有 N 列共享且与 tile 宽度无关，即 202 B、3.156 bits/weight，且它沿收缩方向自适应而非按输出通道。
+      两者是不同的 quantizer：下面的精度表用建模 layout，与硬件共享方式对齐需要重新拟合 codebook。
+      two-K32 的 16-factor 布局在 N 轴上仍超出指令所能提供的范围。
       Global scale 是 folded software metadata，不是 native LUT-B operand。
     </div>
   </section>
@@ -354,6 +358,10 @@
         <div class="ctrl-label">MLA physical layout（HBM bound）</div>
         <div class="seg" id="segLayout"></div>
       </div>
+      <div class="ctrl" id="hxSrcCtrl">
+        <div class="ctrl-label">数据来源</div>
+        <div class="seg" id="segHxSrc"></div>
+      </div>
       <div class="ctrl" id="klCtrl">
         <div class="ctrl-label">KL chart view</div>
         <div class="seg" id="segKlView"></div>
@@ -383,7 +391,7 @@
     <div class="speed-caption" id="hxCaption"></div>
 
     <div class="fig-note">
-      <b>协议。</b>KL₅₀：相对 BF16 teacher 的 top-50 bucketed forward KL（nats/token），是 full-vocabulary KL
+      <b>数据来源开关。</b>“Rubin 原生实测”将每个数据点切换为 Vera Rubin 节点上经融合 <code>tcgen05.mma…decompress::lut::b</code> 路径的实测值（权重仅以物理 3-bit payload 存在，激活为 E4M3）；“模拟 QDQ”为 BF16 矩阵乘的量化-反量化研究。MiniMax 原生覆盖为部分（锚点配方全上下文；两-K32 家族 8K），随节点批次完成持续增长。 <b>协议。</b>KL₅₀：相对 BF16 teacher 的 top-50 bucketed forward KL（nats/token），是 full-vocabulary KL
       的 data-processing 下界；PPL：WikiText-2 test，16 × 8192-token blocks。Lloyd-Max 与 OSCAR+LM 两行使用
       Rubin 硬件 Q/P 契约（E4M3 + UE8M0 block32）；Lloyd-Max 已使用 corrected denominator ordering，
       OSCAR+LM corrected rerun 仍 pending；
@@ -391,7 +399,7 @@
       Kimi PPL 沿用 native 的 last-2048-NLL protocol，不可跨模型比较。<b>速度。</b>针对 Qwen3-4B decode（36 层 · 32 Q / 8 KV heads ·
       head dim 128）的 attention-only 解析 roofline：K3V3 每值存 3.125 bit 外加 BF16 窗口（8K 下约 3.63 b/val），
       MXFP8 的 M tile 固定为 128，GQA4 single-token decode 最多填 4 行。因为 LUT-B throughput 未公开，
-      panel 显示从 data path 推导的 40–70% engineering guess，中心为 55%；它不是 Rubin 实测。不含
+      panel 显示对 LUT-B 速率 <code>r</code> 的敏感性区间；<code>r = 1</code>（与 dense FP8 持平）是架构上限。不含
       weights、MLP、sampling 与调度。完整消融见 <a href="#sec4">§5.2</a>；完整推导见
       <a href="#throughput">§5.3</a>。Kimi panel 使用 14.3 GB/GPU runtime reserve，并把固定 HBM pool
       平均分给并发 requests；这是 allocation arithmetic，不是 supported context claim。
@@ -404,19 +412,25 @@
     <div class="tldr" id="tldr">
       <h2>TL;DR</h2>
       <ol>
-        <li><strong>Weight 是最自然的 LUT-B target，但 scale contract 必须分清。</strong>CUDA 13.4 reference
-          LUT payload 是 K64 3.125 bits/weight，native SFB path 是 K64 3.25 bits/weight。实测的 3.375-bit
-          two-K32 rows 是 non-native quality oracle。根据 data path，我对 native K64 的估计是 dense FP8
-          的 40–70%，中心为 55%；32.33× H100 byte ceiling 需要约 79%。</li>
-        <li><strong>当前 LUT-B MMA 不支持 A3 作为 matrix A。</strong>公开 PTX 只有 B operand 的 lookup
-          decompression；W3 已占用该 operand，因此 W3A3 无法编码。本文支持的 pairing 是 E4M3 A +
-          UE8M0 K32 scale 与 3-bit LUT-B operand。</li>
-        <li><strong>KV 能用同一条指令，但 layout 更难。</strong>QK group 是 8 tokens × 64 head channels；
-          PV group 是 64 tokens × 8 value channels。Offline LM 与可选 OSCAR 把 Qwen K3V3 保持在 PPL
-          约 10.4，而 per-tile uniform K3V3 的 PPL 是 1504。</li>
-        <li><strong>Context capacity 是共享 HBM budget，不是模型支持声明。</strong>在本文 TP8 memory
-          assumptions 下，single-request arithmetic 是 runtime retile 的 10.0M，或 two direct layouts
-          的 6.21M；该 pool 会被并发 requests 平分，而且 checkpoint 自身 positional limit 不变。</li>
+        <li><strong>这条指令现在有完整规格了，而其中一个 operand 就解释了整个设计。</strong>PTX ISA 9.4
+          文档化了 <code>decompress::lut::b</code>，它的第五个 operand 不是指向内存的指针：那张八项 E4M3
+          表住在 <em>Tensor Memory</em> 里，两列对齐，和 accumulator 放在一起。被压缩的只能是 B、只能是
+          E4M3、不能 transpose，而且每 8 列 slice 共享一张表。重建发生在 MMA 内部，所以这条指令的上限就是
+          与 dense FP8 MMA 持平 —— 它只能追平 dense 速率、不可能超过，它买到的是 bytes。</li>
+        <li><strong>在约 3.2 bits/weight 上，recipe 比 format 更值钱。</strong>穿过同一份 payload，Qwen3-4B
+          的 perplexity 从 15.90 到 11.44，差别只来自 codebook 怎么拟合。带 rotation 与不带的差距是
+          一到两个点，而不同 scale layout 之间只差几分之一点。质量来自 rotation，不是 scale 粒度。</li>
+        <li><strong>把 codebook 与误差补偿交替优化只值一轮 —— 而且在 MoE 上会反噬。</strong>用补偿后的
+          残差重新拟合八个质心，第一轮值 0.23 PPL，之后就测不出差别了。在 mixture of experts 上每一轮
+          都更差：128 选 4 时，每个 expert 的 Hessian 只由校准集的一小片估出来，补偿步在拟合噪声，
+          交替只是放大它。</li>
+        <li><strong>对 KV 来说，FP8 的 Q/P 几乎是免费的，而两个误差源相互独立。</strong>把 attention 误差
+          拆开看：3-bit K/V 贡献 11.5% 相对 RMS，FP8 Q/P 只有 3.4%，而且两者按平方和合成而非叠乘 ——
+          合起来 11.9%，预测 11.9%。真正花掉精度的不是量化 Q 和 P，是 cache。</li>
+        <li><strong>真正还值得争论的是 scale 的 layout。</strong>把一个 K64 tile 切成两个独立 scale 的 K32
+          半区，在模拟里读数更好，而 <code>block32</code> 本身确实是"沿 K 每 32 元素一个 scale"。没有定论的是
+          共享轴:一个随输出通道自适应的因子，和一个沿收缩方向自适应的因子，是两种不同的 quantizer，本文这些行
+          建模的是前者。two-K32 布局可以用两遍掩码 A 的 MMA 精确执行(每遍的因子沿收缩方向恒定,提出求和是精确的),代价是 2× 指令发射 —— 所以那些行现在带的是 2× 开销标注,而不是没有估计。</li>
       </ol>
     </div>
 
@@ -495,23 +509,22 @@ effective         = 3.125 bit/value</code></pre>
     </p>
 
     <h3>2.2 CUDA 13.4 compile test 告诉了我们什么？</h3>
-    <p>
-      我们在 clean K8s container 中 compile PTX，并检查生成的 SASS。之后的 PTX 9.4 复审把 probes 从
-      <code>sm_107a</code> 重定向到文档规定的 <code>sm_107f</code> K64 形式；SASS 证据早于这次修正的行会注明，
-      在 rerun 落地之前，这些行的合法性结论以 ISA 文本为准：
-    </p>
+    <p>我们在 clean K8s container 中 compile PTX，并检查生成的 SASS：</p>
     <div class="table-wrap"><table class="data">
       <thead><tr><th>Probe</th><th>Compatibility</th><th>Compiler / SASS Evidence</th><th>Meaning</th></tr></thead>
       <tbody>
-        <tr><td><code>sm_107f</code> family target</td><td><span class="faint">REQUIRED</span></td><td>Compile probe updated; rerun pending</td><td>Prior <code>sm_107a</code> syntax pass did not validate documented K64 form</td></tr>
+        <tr><td><code>sm_107f</code> family target</td><td><span class="ok">REQUIRED AND SUFFICIENT</span></td><td>可汇编为 <code>UTCQMMA.LUTB</code>；纯 <code>sm_107</code> 拒绝所有 <code>tcgen05</code> 指令</td><td>decompression qualifier 绑定在 family target 上，不是 arch-specific target</td></tr>
+        <tr><td>LUT 的位置</td><td><span class="ok">TENSOR MEMORY</span></td><td>第五个 operand <code>[b-decompress-metadata]</code>，两列对齐</td><td>它不是指向 shared/global memory 的指针，寻址方式与 accumulator 同类</td></tr>
+        <tr><td>压缩 B 的取数</td><td><span class="ok">读 48 B，用 24 B</span></td><td>descriptor bit 53 选择 K=128 流里的哪半个 24 B</td><td>3 bits × 64 values = 24 B/列，所以一条指令只消费它取来的一半</td></tr>
+        <tr><td>LUT 共享粒度</td><td><span class="ok">8 个 N 列</span></td><td>每个 8 列对齐的 N slice 一张八项 E4M3 表</td><td>与 payload 打包所依据的 K64×N8 granule 一致</td></tr>
         <tr><td>UE5M3 conversion</td><td><span class="ok">SUPPORTED</span></td><td><code>F2FP.SATFINITE.UE5M3</code></td><td>The UE5M3 datatype itself exists</td></tr>
-        <tr><td>Dense E4M3 A × LUT-B E4M3 B</td><td><span class="ok">SUPPORTED</span></td><td>PTX 9.4 form; pre-fix <code>UTCQMMA.LUTB</code> SASS, <code>sm_107f</code> rerun pending</td><td>The basic QK/PV mapping is legal</td></tr>
-        <tr><td>MXFP8 block32 A × LUT-B B</td><td><span class="ok">SUPPORTED</span></td><td>PTX 9.4 form; pre-fix SASS + scale TMEM, rerun pending</td><td>Scaled Q/P can be fused</td></tr>
+        <tr><td>Dense E4M3 A × LUT-B E4M3 B</td><td><span class="ok">SUPPORTED</span></td><td><code>UTCQMMA.LUTB</code></td><td>The basic QK/PV mapping is legal</td></tr>
+        <tr><td>MXFP8 block32 A × LUT-B B</td><td><span class="ok">SUPPORTED</span></td><td><code>UTCQMMA.LUTB</code> + scale TMEM</td><td>Scaled Q/P can be fused</td></tr>
         <tr><td>Two independent K32 B scales</td><td><span class="no">NOT NATIVE</span></td><td>PTX Tables 70–71</td><td><code>mxf8f6f4</code> 只暴露 <code>scale_vec::1X</code></td></tr>
         <tr><td>LUT-B full-tile throughput</td><td><span class="faint">UNKNOWN</span></td><td>No PTX/spec value</td><td>17.5P dense FP8 不是 LUT-B rate</td></tr>
-        <tr><td>LUT-B collector B reuse</td><td><span class="ok">SUPPORTED</span></td><td>PTX collector fill/use/lastuse semantics</td><td>One K/V tile can be reused across GQA heads; reuse is opportunistic and may reload</td></tr>
-        <tr><td>Sparse A × ordinary B</td><td><span class="ok">SUPPORTED</span></td><td>PTX-defined sparse-A MMA; pre-fix <code>UTCQMMA</code> SASS</td><td>Sparse-A MMA itself exists</td></tr>
-        <tr><td>Sparse A × LUT-B B</td><td><span class="no">UNSUPPORTED</span></td><td>No such ISA form; <code>ptxas</code> rejects, rerun pending</td><td>Sparse P cannot be combined with LUT-B V</td></tr>
+        <tr><td>LUT-B collector B reuse</td><td><span class="ok">SUPPORTED</span></td><td><code>B_KEEP</code> → <code>B_REUSE</code></td><td>One K/V tile can be reused across GQA heads</td></tr>
+        <tr><td>Sparse A × ordinary B</td><td><span class="ok">SUPPORTED</span></td><td><code>UTCQMMA</code> control</td><td>Sparse-A MMA itself exists</td></tr>
+        <tr><td>Sparse A × LUT-B B</td><td><span class="no">UNSUPPORTED</span></td><td><code>ptxas</code> rejects <code>mma.sp...lut::b</code></td><td>Sparse P cannot be combined with LUT-B V</td></tr>
         <tr><td>MXFP8 + UE5M3 scale + LUT-B</td><td><span class="no">UNSUPPORTED</span></td><td>PTX 9.4 Table 71</td><td>The FP8 scale must use UE8M0</td></tr>
         <tr><td>Transposed LUT-B B</td><td><span class="no">UNSUPPORTED</span></td><td>PTX 9.4 restriction</td><td>K must be stored physically as Kᵀ</td></tr>
       </tbody>
@@ -550,104 +563,58 @@ effective         = 3.125 bit/value</code></pre>
 
     <h3>3.1 Accuracy</h3>
     <p>
-      表格保留原 two-K32 rows，并加入 native one-K64 rows。重新审计 PTX 9.4 后，所有 two-K32 rows
-      都归类为 <strong>non-native quality oracle</strong>；只有 one-K64 SFB rows 映射到 Rubin LUT-B。
+      表格保留原 two-K32 rows，并加入 one-K64 rows；两个家族现在都能在 Rubin 上原生执行 —— one-K64 是每 tile 一条 MMA,
+      <strong>two-K32 则以两遍掩码 A 的 K64 LUT-B pass 原生运行</strong>(tile 级 bit-exact,12 行已在真机端到端实测)。
       PPL/KL 使用一个 131072-token block 与 256 个 KL₅₀ samples。方法包括 GPTQ
       <span class="cite"><a href="#ref-gptq">[4]</a></span>、QuaRot-style H64
       <span class="cite"><a href="#ref-quarot">[7]</a></span>，以及 RMS²-weighted Lloyd-Max
       <span class="cite"><a href="#ref-max">[1]</a><a href="#ref-lloyd">[2]</a></span>。
     </p>
     <div class="table-wrap"><table class="data">
-      <caption>128K accuracy；one-K64 是 native candidate，two-K32 只作为 quality oracle</caption>
+      <caption>128K accuracy；one-K64 每 tile 一条原生 MMA,two-K32 以两遍掩码 A pass 原生运行</caption>
       <thead><tr><th>128K method</th><th class="num">Qwen PPL / KL₅₀</th><th class="num">Gemma PPL / KL₅₀</th><th class="num">MiniMax routed PPL / KL₅₀</th></tr></thead>
       <tbody>
         <tr><td>BF16 W + BF16 A</td><td class="num"><strong>8.482 / 0.00000</strong></td><td class="num"><strong>5.771 / 0.00000</strong></td><td class="num"><strong>4.124 / 0.00000</strong></td></tr>
         <tr><td>BF16 W + A8</td><td class="num">8.547 / 0.00504</td><td class="num">5.786 / 0.02114</td><td class="num">4.115 / 0.01756</td></tr>
-        <tr><td>H64 + inter-LM-GPTQ round 1 (ours) + K64 SFB + global</td><td class="num">10.671 / <strong>0.25061</strong></td><td class="num"><strong>6.954</strong> / 0.38775</td><td class="num">5.183 / 0.26777</td></tr>
-        <tr><td>H64 + K64 LUT-GPTQ + two-K32 SFB + global</td><td class="num">10.643 / 0.25499</td><td class="num">7.067 / 0.37087</td><td class="num"><strong>5.032 / 0.21195</strong></td></tr>
+        <tr><td>H64 + K64 LUT-GPTQ [4,7] (two-K32, no global)</td><td class="num"><strong>10.504 / 0.28601</strong></td><td class="num"><strong>7.034 / 0.37273</strong></td><td class="num"><strong>5.076 / 0.20916</strong></td></tr>
         <tr><td>H64 + K64 LUT-GPTQ + K64 SFB + global</td><td class="num">10.899 / 0.26852</td><td class="num">7.169 / <strong>0.27815</strong></td><td class="num">5.078 / 0.23976</td></tr>
-        <tr><td>H64 + K64 LUT-GPTQ [4,7] (two-K32, no global)</td><td class="num"><strong>10.504</strong> / 0.28601</td><td class="num">7.034 / <strong>0.37273</strong></td><td class="num"><strong>5.076 / 0.20916</strong></td></tr>
-        <tr><td>GPTQ + H64 + RMS²-weighted Lloyd–Max + two-K32 SFB + global</td><td class="num">10.803 / 0.28762</td><td class="num">7.082 / 0.34986</td><td class="num">5.032 / 0.21195†</td></tr>
-        <tr><td>GPTQ + H64 + RMS²-weighted Lloyd–Max [1,2,4,7] (two-K32, no global)</td><td class="num">10.607 / 0.31554</td><td class="num">7.043 / 0.34431</td><td class="num">5.076 / 0.20916†</td></tr>
+        <tr><td>H64 + K64 LUT-GPTQ + two-K32 SFB + global</td><td class="num">10.643 / <strong>0.25499</strong></td><td class="num">7.067 / 0.37087</td><td class="num"><strong>5.032 / 0.21195</strong></td></tr>
         <tr><td>Activation-RMS²-weighted Lloyd-Max (ours) [1,2] (two-K32, no global)</td><td class="num">11.613 / 0.36921</td><td class="num">7.706 / 0.55274</td><td class="num">6.474 / 0.42795</td></tr>
-        <tr><td>K64 block-diagonal LUT-GPTQ [4]</td><td class="num">12.471 / 0.38442</td><td class="num">7.822 / 0.50819</td><td class="num">5.327 / 0.24296</td></tr>
-        <tr><td>Activation-RMS² Lloyd-Max + two-K32 SFB + global</td><td class="num">11.653 / 0.39943</td><td class="num">8.247 / 0.61031</td><td class="num"><strong>4.986</strong> / 0.18677</td></tr>
-        <tr><td>UE8M0-scale search + Lloyd-Max (ours) [1,2]</td><td class="num">12.845 / 0.43388</td><td class="num">193.054 / 3.54611</td><td class="num">7.835 / 0.65367</td></tr>
         <tr><td>Activation-RMS² Lloyd-Max + K64 SFB + global</td><td class="num">12.188 / 0.43398</td><td class="num">8.395 / 0.65079</td><td class="num">5.014 / <strong>0.17007</strong></td></tr>
+        <tr><td>Activation-RMS² Lloyd-Max + two-K32 SFB + global</td><td class="num">11.653 / 0.39943</td><td class="num">8.247 / 0.61031</td><td class="num"><strong>4.986</strong> / 0.18677</td></tr>
+        <tr><td>K64 block-diagonal LUT-GPTQ [4]</td><td class="num">12.471 / 0.38442</td><td class="num">7.822 / 0.50819</td><td class="num">5.327 / 0.24296</td></tr>
+        <tr><td>UE8M0-scale search + Lloyd-Max (ours) [1,2]</td><td class="num">12.845 / 0.43388</td><td class="num">193.054 / 3.54611</td><td class="num">7.835 / 0.65367</td></tr>
         <tr><td>Folded AWQ + Lloyd-Max [1,2,5]</td><td class="num">12.666 / 0.45302</td><td class="num">10.719 / 0.83232</td><td class="num">5.404 / 0.29059</td></tr>
         <tr><td>Lloyd-Max W3A8 [1,2] (MiniMax: routed-expert w13/w2 W3 only; A remains BF16)</td><td class="num">12.703 / 0.48603</td><td class="num">180.144 / 3.67195</td><td class="num">7.488 / 0.58320</td></tr>
         <tr><td>Dense-only SqueezeLLM [6]</td><td class="num">13.332 / 0.49994</td><td class="num">11.180 / 1.02137</td><td class="num">6.513 / 0.43720</td></tr>
-        <tr><td>Zero-aware NF3 (normal-float adaptation)</td><td class="num">29.646 / 1.26669</td><td class="num">4358.944 / 6.57245</td><td class="num">2032820.392 / 13.30284</td></tr>
-        <tr><td>Uniform scalar quantization [8]</td><td class="num">162.126 / 2.89007</td><td class="num">19733.351 / 7.98959</td><td class="num">535932.314 / 12.15861</td></tr>
+        <tr><td>Zero-aware NF3 (normal-float adaptation) [8]</td><td class="num">29.646 / 1.26669</td><td class="num">4358.944 / 6.57245</td><td class="num">2032820.392 / 13.30284</td></tr>
+        <tr><td>Uniform scalar quantization [9]</td><td class="num">162.126 / 2.89007</td><td class="num">19733.351 / 7.98959</td><td class="num">535932.314 / 12.15861</td></tr>
       </tbody>
     </table></div>
     <p>
-      Two-K32 oracle 说明更细 scaling 可以改善 quality，但它不是 deployable Rubin schedule。Native
-      one-K64 rows 中，H64 在本 sweep 里优于 RMS²，同时仍需在 A 上执行 matching runtime transform。
-    </p>
-    <p>
-      <strong>Production KL 交叉验证。</strong>所有 MiniMax 行都额外按我们的 production truncated-KL
-      协议（prod-KL）打了分，端到端跑在真实 SGLang serving stack 上：先让 native BF16 server 用模型自己的采样设置
-      一次性生成 64 条 HLE 推理 trace，然后每个量化 arm 在完全相同的 718,159 个位置上做 teacher-forcing——覆盖
-      prompt 加 response 的全部位置，在 reference top-40 support 上打分并对缺失 id 做 candidate-floor clamp，
-      未覆盖的 teacher 尾部单独上报、不进求和。这个 probe 自带固定 token 集，所以每个方法只有一个数、不分 context。
-      在这批自生成 trace 上，serving stack 逐位确定——独立的第二个 native pass 恰好读作 0.00000——且 reference
-      top-40 support 只留下 0.65% 未覆盖尾部。粗排序与 WikiText KL₅₀ 一致：RMS² + global-scale 两行领先（two-K32
-      oracle 0.072、native K64 0.077），GPTQ/H64 家族压缩到 0.083–0.090 的窄带（推理位置以高置信 token 为主），
-      AWQ 居中，unweighted Lloyd-Max 变体靠后。一个有启发性的例外仍在：NF3/uniform 这类塌缩基线读作 ≈7.3/5.4
-      prod-KL 对 ≈13.3/12.2 KL₅₀，因为在 teacher support 上重归一化会掩盖 candidate 的 off-support 质量塌缩，
-      而 KL₅₀ 的显式尾部桶能捕捉它。所以对塌缩模型 prod-KL 必须和 PPL 一起读；完整列见 PLAN 表格。
+      Two-K32 说明更细 scaling 可以改善 quality,而且它现在是 deployable 的:两遍掩码 A 的原生执行实测只比
+      one-K64 慢 ~10% 墙钟。one-K64 rows 中,H64 在本 sweep 里优于 RMS²,同时仍需在 A 上执行 matching runtime transform。
     </p>
 
-    <h3>3.2 迭代方法：inter-LM-GPTQ</h3>
-    <div class="callout">
-      <strong>循环本身。</strong>inter-LM-GPTQ 是我们的离线 quantizer–corrector 循环，把本研究已经用到的两个经典组件拼在一起。
-      GPTQ<span class="cite"><a href="#ref-gptq">[4]</a></span> 是<em>corrector</em>：固定 codebook 不动，按 Hessian 排序逐列量化权重，并把每列的
-      rounding error 通过校准 Hessian 传播进还没量化的列。Lloyd–Max<span class="cite"><a href="#ref-max">[1]</a><a href="#ref-lloyd">[2]</a></span>
-      是<em>quantizer 设计器</em>：给定权重，它的 M-step 重新拟合 8 项 E4M3 codebook（可选用逐列 activation RMS²、即对角 Hessian 重要性加权）。
-      两者互相看不到对方的输出，于是我们让它们交替：round 0 先拟合 codebook 并跑一遍 GPTQ；之后每一轮都在 GPTQ 实际产出的
-      误差补偿权重上重拟 codebook，再用新 codebook 重跑 GPTQ。全部发生在离线——每一轮输出的都是同样的 3-bit indices、E4M3 LUT、
-      UE8M0 SFB 和折叠的 global scale，Rubin runtime contract 逐字节不变。
-    </div>
-    <p>
-      <strong>它收敛吗？收敛有用吗？</strong>这个循环确实收敛：Hessian 加权的重构目标单调下降（plain 变体 −22.7%）并停在不动点。
-      但 raw per-layer MSE 几乎不动、且个别层双向互换，所以终端指标 KL₅₀ 对轮数并不单调——层内重构和端到端 KL 是两个目标，
-      而且每次 GPTQ 重跑都会重新注入 Hessian 估计噪声。实践上，交替是一个廉价的 held-out 选择旋钮：dense 模型上一轮有小而
-      种子一致的增益（4096 校准 tokens 下配对均值 −0.009 KL₅₀）；Hessian 饥饿的 MoE routed experts 上每一轮都变差，应保持关闭。
-    </p>
-    <p>
-      §3.1 表格里有三行来自这个 sweep：round-1 交替行与两条 GPTQ + H64 + RMS² 加权行。<strong>H64 + inter-LM-GPTQ (round 1)</strong>
-      的 runtime contract 与 native H64 行完全一致，却在 Qwen 所有 context 上都有改进，拿下 native Qwen 128K 最优 KL₅₀（0.25061）与 Gemma PPL
-      整列最优。这个 sweep 同时校定了误差条：仅 H64 符号种子一项就使 KL₅₀ 波动 σ ≈ 0.009（无加权
-      codebook）到 0.028（RMS² 加权）；按种子配对后只有校准规模（512→4096 tokens，−0.022 KL₅₀）和一轮交替
-      （−0.009）是真实效应——RMS² 加权本身不是，这就是加权 two-K32 行与无加权版互有胜负的原因。† 两条加权行的 MiniMax 单元格都与对应 H64 行共享：routed pipeline 的 codebook 本来就始终是 RMS² 加权的。
-      MiniMax 的交替 rerun 测出了相反方向——rounds 1–4 每一轮在所有 context 上都比 round 0 差（128K KL₅₀
-      round 0 为 0.23976，rounds 1–4 为 0.252–0.275）——正是 Hessian 饥饿分析对「每个 expert 只见 ~1/32
-      校准 token」的预测，所以 routed experts 不应开交替。Qwen/Gemma 上 rounds 1–4 在种子噪声带内洗牌（逐轮表见 PLAN）；分 context 的最优轮次可达
-      Qwen 64K 10.564 / 0.23425（round 3）。同 bitrate 的紧凑 <strong>AQLM</strong><span class="cite"><a href="#ref-aqlm">[9]</a></span> 复现（additive VQ，M=3、2⁸
-      codes、g=8，无 SGD fine-tune）随交替轮数单调改善，但在 8K 协议上饱和于 16.096 PPL / 0.470
-      KL₅₀——比 GPTQ 修正的 scalar LUT 差约 2×——说明没有 fine-tuning 阶段的 additive VQ 在这个硬件
-      contract 下不具竞争力。
-    </p>
-
-    <h3>3.3 Kernel Organization</h3>
+    <h3>3.2 Kernel Organization</h3>
 <pre><code>A[M,K] × B[K,N], where B = Wᵀ
 one B tile = W[n:n+8, k:k+64]
 reference  = 192 B indices + 8 B LUT             = 200 B = 3.125 bit/W
-native SFB = reference + 8 × UE8M0 (scale_B=1×N) = 208 B = 3.250 bit/W
+native SFB（建模）= reference + 8 × UE8M0（每个 N 列一个）= 208 B = 3.250 bit/W
+native SFB（硬件）= reference + 2 × UE8M0（每个 K32 半区一个）= 202 B = 3.156 bit/W
 global     = one FP32 scale/tensor, folded outside the LUT-B instruction
-two K32    = 216 B = 3.375 bit/W，algorithm oracle only（not native LUT-B）</code></pre>
+two K32    = 216 B = 3.375 bit/W，两遍掩码 A K64 pass 原生运行(~10% 墙钟溢价)</code></pre>
     <div class="table-wrap"><table class="data">
       <thead><tr><th>Method family</th><th>Offline work</th><th>Runtime change beyond MXFP8-A × LUT-B-B</th></tr></thead>
       <tbody>
-        <tr><td>LM / RMS² / GPTQ / SqueezeLLM</td><td>Fit tile-local LUT and pack indices/scales</td><td>只有 K64-contract rerun 才是 native；原始 rows 是 two-K32 oracle</td></tr>
+        <tr><td>LM / RMS² / GPTQ / SqueezeLLM</td><td>Fit tile-local LUT and pack indices/scales</td><td>K64 rows 每 tile 一条 MMA;原始 two-K32 rows 以两遍掩码 A pass 原生运行</td></tr>
         <tr><td>Folded AWQ</td><td>Fold scale into RMSNorm and consumer weights, then fit LUT</td><td>None for supported fold groups</td></tr>
         <tr><td>H64 + GPTQ</td><td>Rotate every K64 weight block before fitting</td><td>Matching signed H64 on each A K64 block</td></tr>
         <tr><td>MiniMax routed methods</td><td>Apply the same K64×N8 format to routed experts</td><td>Current simulation changes routed gate input only</td></tr>
       </tbody>
     </table></div>
 
-    <h3>3.4 Simulation Estimate</h3>
+    <h3>3.3 Simulation Estimate</h3>
     <div class="table-wrap"><table class="data">
       <thead><tr><th>Native Rubin Weight Contract</th><th class="num">Bits/W</th><th class="num">Byte-only vs H100 BF16</th><th class="num">Byte-only vs B200 BF16</th><th class="num">Required LUT-B Rate</th></tr></thead>
       <tbody>
@@ -655,20 +622,62 @@ two K32    = 216 B = 3.375 bit/W，algorithm oracle only（not native LUT-B）</
         <tr><td>K64 native SFB + folded global scale</td><td class="num">3.250</td><td class="num">32.33×</td><td class="num">13.54×</td><td class="num">13.86P = 79.2% dense FP8</td></tr>
       </tbody>
     </table></div>
+    <p>
+      ISA 和 datasheet 都没有给 LUT-B 的速率，所以诚实的呈现方式是对单个参数做敏感性分析。记
+      <code>r</code> 为 LUT-B 全 tile 吞吐相对 dense FP8 peak 的比例。由于重建发生在 MMA 内部而不是
+      单独一遍，<code>r = 1</code> 就是架构上限：这条指令不可能超过同形状的 dense FP8 MMA，只能追平。
+    </p>
     <div class="table-wrap"><table class="data">
-      <caption>Data-path engineering guess；不是 measured throughput</caption>
-      <thead><tr><th class="num">Full-tile LUT-B judgment</th><th class="num">vs Rubin BF16</th><th class="num">vs H100 BF16</th><th class="num">vs B200 BF16</th></tr></thead>
+      <caption>weight-read-bound 情形下对 <code>r</code> 的敏感性（LUT-B 相对 dense FP8 peak 的比例，3.25 bit/W）</caption>
+      <thead><tr><th class="num">r</th><th class="num">vs Rubin BF16</th><th class="num">vs H100 BF16</th><th class="num">vs B200 BF16</th><th>瓶颈</th></tr></thead>
       <tbody>
-        <tr><td class="num">40% lower guess</td><td class="num">2.49×</td><td class="num">16.32×</td><td class="num">6.84×</td></tr>
-        <tr><td class="num">55% center guess</td><td class="num">3.42×</td><td class="num">22.45×</td><td class="num">9.40×</td></tr>
-        <tr><td class="num">70% upper guess</td><td class="num">4.35×</td><td class="num">28.57×</td><td class="num">11.96×</td></tr>
+        <tr><td class="num">0.50</td><td class="num">3.11×</td><td class="num">20.41×</td><td class="num">8.55×</td><td>Tensor Core 速率</td></tr>
+        <tr><td class="num">0.65</td><td class="num">4.04×</td><td class="num">26.53×</td><td class="num">11.11×</td><td>Tensor Core 速率</td></tr>
+        <tr><td class="num">≥ 0.79</td><td class="num">4.92×</td><td class="num">32.33×</td><td class="num">13.54×</td><td>权重字节</td></tr>
       </tbody>
     </table></div>
     <p>
-      32.33× 只是最右侧 byte ceiling。达到它要求 LUT-B 先持续提供 13.86 PFLOP/s，也就是 Rubin dense FP8
-      peak 的约 79.2%。我们的 40–70% engineering band 更低：integrated lookup 应明显优于 software dequant，
-      但 48B-to-24B descriptor fetch、TMEM LUT staging 与 collector dependency 又应弱于普通 dense FP8。
-      Two-K32 oracle 不分配任何 speed estimate。
+      这张表的结构比其中任何一个数字更重要。<code>r ≈ 0.79</code> 以上，瓶颈从 Tensor Core 转到权重字节，
+      天花板锁在 32.33× H100 不再上升；以下则吞吐随 <code>r</code> 线性变化、天花板不可达。所以"值不值得
+      写这个 kernel"等价于"这条指令是否落在区间的上半部分"。让后者可信的是重建发生的位置：在 MMA 内部，
+      不materialize dense 权重，也没有单独一遍 dequantization 要付。Two-K32 行带的是实测的两遍开销 —— 端到端原生评测中约 10% 的墙钟溢价 ——
+      而不再是“无估计”。
+    </p>
+
+    <h3>3.4 把 codebook 与误差补偿交替优化</h3>
+    <p>
+      GPTQ<span class="cite"><a href="#ref-gptq">[4]</a></span> 和 Lloyd–Max
+      <span class="cite"><a href="#ref-max">[1]</a><a href="#ref-lloyd">[2]</a></span>
+      解决的是同一个问题的两半，通常各跑一次：Lloyd–Max 摆放八个 E4M3 质心使 tile 上的重建误差最小，
+      然后 GPTQ 逐列走一遍、把每次舍入的误差推给尚未量化的列。问题是第二步改变了第一步所拟合的残差 ——
+      补偿前最优的 codebook，补偿后不再最优。这就提示应该交替，而不是顺序执行。
+    </p>
+    <p>
+      一轮交替的含义是：用补偿后的残差重新拟合八个质心，然后固定这组质心重跑列扫描。payload 格式完全不变，
+      仍是 3-bit 索引、八项 E4M3 表、每行一个 UE8M0 scale，所以 kernel 和存储核算一动不动，变的只是
+      离线拟合落在哪组值上。
+    </p>
+    <div class="table-wrap"><table class="data">
+      <caption>Qwen，128K，H64 + native SFB + tensor-global scale；交替轮数对照单次拟合</caption>
+      <thead><tr><th>离线 schedule</th><th class="num">Qwen PPL / KL₅₀</th><th class="num">Gemma PPL / KL₅₀</th><th class="num">MiniMax routed PPL / KL₅₀</th></tr></thead>
+      <tbody>
+        <tr><td>单次（round 0）</td><td class="num">10.899 / 0.26852</td><td class="num">7.169 / 0.27815</td><td class="num">5.078 / 0.23976</td></tr>
+        <tr><td>交替 1 轮</td><td class="num"><strong>10.671 / 0.25061</strong></td><td class="num">6.954 / 0.38775</td><td class="num">5.183 / 0.26777</td></tr>
+        <tr><td>交替 2 轮</td><td class="num">10.711 / 0.27489</td><td class="num"><strong>6.921</strong> / 0.34937</td><td class="num">5.201 / 0.25187</td></tr>
+        <tr><td>交替 3 轮</td><td class="num">10.505 / 0.26238</td><td class="num">6.949 / 0.36999</td><td class="num">5.200 / 0.26680</td></tr>
+        <tr><td>交替 4 轮</td><td class="num">10.640 / 0.26946</td><td class="num">6.960 / 0.37505</td><td class="num">5.191 / 0.27536</td></tr>
+      </tbody>
+    </table></div>
+    <p>
+      第一轮在 Qwen 上值 0.23 PPL 和 0.018 KL₅₀；之后各轮的变化落在同配置重跑本身的抖动范围内，既谈不上
+      改善也谈不上变差。我们会 ship 一轮。而且这个过程不是单调下降：codebook 最小化的目标与我们报告的
+      perplexity 相关但不等同，所以"多交替几轮"并不自动更好。
+    </p>
+    <p>
+      在 MiniMax-M3 上同一个 schedule 每一轮都更差，原因值得讲清而不是当作意外。GPTQ 需要用校准激活估
+      Hessian，而 mixture of experts 里每个 expert 只看到路由给它的 token。128 选 4 时，单个 expert 的
+      Hessian 由校准集的一小片估出，补偿步实际在拟合噪声，交替则放大噪声而非信号。这是 routing sparsity
+      的性质，不是 payload 格式的问题；它指向的做法是给每个 expert 更多校准 token，而不是加轮数。
     </p>
 
     <h2 id="activation"><span class="idx">4</span>Activation Quantization：保留 A8；当前不支持 A3</h2>
@@ -709,7 +718,29 @@ two K32    = 216 B = 3.375 bit/W，algorithm oracle only（not native LUT-B）</
       都压成 3-bit，而是压缩每个 decode step 都会反复读取的 cache；Q 和 P 仍作为 MXFP8 matrix A。
     </p>
 
-    <h4>5.1.1 GQA KV 与 MLA latent：同一条配方，两种 cache</h4>
+    <h4>5.1.1 attention 的误差究竟来自哪里</h4>
+    <p>
+      在进入 layout 细节之前，值得先问这份契约的哪一半在花精度。这里量化了两样东西：cache 降到 3 bit，
+      而 <code>Q</code> 和 <code>P</code> 降到 FP8。用双精度参考模拟单个 head、逐个打开这两个来源，
+      就能干净地分开。
+    </p>
+    <div class="table-wrap"><table class="data">
+      <caption>attention 输出的相对 RMS 误差（单 head，对照精确 attention）</caption>
+      <thead><tr><th>打开的量化</th><th class="num">相对 RMS</th></tr></thead>
+      <tbody>
+        <tr><td>仅 FP8 <code>Q</code>/<code>P</code>，K/V 精确</td><td class="num">0.0337</td></tr>
+        <tr><td>仅 3-bit K/V，<code>Q</code>/<code>P</code> 精确</td><td class="num"><strong>0.1145</strong></td></tr>
+        <tr><td>两者同开，即部署契约</td><td class="num">0.1191</td></tr>
+      </tbody>
+    </table></div>
+    <p>
+      cache 以三倍以上的幅度占主导，而且两个来源相互独立：合起来是 0.1191，而
+      √(0.1145² + 0.0337²) = 0.1194 —— 它们按平方和合成，不是叠乘。这有个实际含义：大家最担心的是把
+      <code>Q</code> 和 <code>P</code> 舍入到 FP8，因为它触及 softmax 路径，而这一步几乎免费。真正花掉的
+      是 cache 里的比特，而那也恰好是唯一能在带宽和容量上回本的部分。
+    </p>
+
+    <h4>5.1.2 GQA KV 与 MLA latent：同一条配方，两种 cache</h4>
     <p>两种架构走的是同一条四步路径：</p>
     <ol>
       <li><strong>Cache 只写一次。</strong>离线准备 codebook；token 进入低精度区域时，只保存 3-bit index 和
@@ -750,7 +781,7 @@ two K32    = 216 B = 3.375 bit/W，algorithm oracle only（not native LUT-B）</
       payload 翻倍。段宽未按比例；8K 时窗口平均只多花约 0.5 bit/value（3.125 → 3.63 b/val）。</figcaption>
     </figure>
 
-    <h4>5.1.2 Attention 里具体怎么算？</h4>
+    <h4>5.1.3 Attention 里具体怎么算？</h4>
     <div class="table-wrap"><table class="data">
       <thead><tr><th>Architecture</th><th>First Multiply: Scores</th><th>Middle</th><th>Second Multiply: Output</th></tr></thead>
       <tbody>
@@ -764,7 +795,7 @@ two K32    = 216 B = 3.375 bit/W，algorithm oracle only（not native LUT-B）</
       <code>B_KEEP → B_REUSE</code>，让一个 K/V tile 服务 4 个 Q heads。
     </p>
 
-    <h4>5.1.3 Lloyd-Max：把 8 个刻度放到真正需要的位置</h4>
+    <h4>5.1.4 Lloyd-Max：把 8 个刻度放到真正需要的位置</h4>
     <p>
       3-bit 只能表示 8 个值。最简单的 uniform quantization 会把 8 个刻度等距排开；如果大多数值挤在 0 附近、
       只有少量 outlier 很大，很多刻度会浪费在几乎没有数据的区域，0 附近反而分得太粗。
@@ -781,7 +812,7 @@ two K32    = 216 B = 3.375 bit/W，algorithm oracle only（not native LUT-B）</
       K/V 两套 8-value codebook；MLA 每层只拟合 latent 的一套 codebook。
     </p>
 
-    <h4>5.1.4 OSCAR：先把尖峰摊平，再交给 3-bit</h4>
+    <h4>5.1.5 OSCAR：先把尖峰摊平，再交给 3-bit</h4>
     <p>
       Lloyd-Max 解决的是“8 个刻度放在哪里”，但如果少数维度特别大，3-bit 仍然很难表示。
       <a href="https://arxiv.org/abs/2605.17757">OSCAR</a> 可以理解为：
@@ -915,8 +946,7 @@ two K32    = 216 B = 3.375 bit/W，algorithm oracle only（not native LUT-B）</
     <p>
       先看单 GPU hardware。H100 和 B200 可以作为 bandwidth baseline，但它们没有 SM107 的
       <code>decompress::lut::b</code>；只有 Rubin 能原生执行本文的 K3V3 LUT-B path。
-      <a href="#kv-explorer">图 2</a> 的速度面板显示 40/55/70% data-path guess 加上 100% dense endpoint；
-      完整的 10/25/50/100% 敏感度行在下文表格里。
+      <a href="#kv-explorer">图 2</a> 的速度面板对应本节推导的 sensitivity endpoints。
     </p>
     <div class="table-wrap"><table class="data">
       <thead><tr><th>GPU</th><th>Memory</th><th class="num">Capacity</th><th class="num">HBM bandwidth</th><th class="num">Dense FP8 ceiling</th><th>Native LUT-B</th></tr></thead>
@@ -930,9 +960,8 @@ two K32    = 216 B = 3.375 bit/W，algorithm oracle only（not native LUT-B）</
       H100 数据来自 <a href="https://www.nvidia.com/en-us/data-center/h100/">NVIDIA H100 specs</a>；B200 使用
       <a href="https://docs.nvidia.com/enterprise-reference-architectures/hgx-ai-factory/latest/components.html">NVIDIA HGX component specs</a>
       的 180 GB / up to 8 TB/s，以及公开 4.5 PFLOP/s dense FP8。NVIDIA 把 Rubin 的 17.5 PFLOP/s FP8/FP6
-      数字列为 dense specification——之前把它当 sparse 减半是错误的。不过 NVIDIA 没有单独公开
-      <code>decompress::lut::b</code> throughput，因此 17.5P dense rate 只是一个 sensitivity endpoint，
-      不是实测 LUT-B rate。
+      数字列为 dense specification。不过 NVIDIA 没有单独公开 <code>decompress::lut::b</code> throughput，
+      因此本文只给 10%/25%/50%/100%-of-dense sensitivity endpoints；它们不是 expected efficiency。
     </p>
     <p>
       Qwen3-4B-Thinking-2507 有 36 layers、32 Q heads、8 KV heads、head dim 128。每个 decode token 的
@@ -952,16 +981,11 @@ two K32    = 216 B = 3.375 bit/W，algorithm oracle only（not native LUT-B）</
     <p>
       这里 TFLOP/s 随 context 不变，是因为 BF16 arithmetic intensity 固定；token/s 会随 context 变长而下降。
     </p>
-    <p>
-      在 1M tokens 下，一条 Qwen3-4B BF16 KV 序列在 36 层上约占 <strong>154.6 GB</strong>；attention-only BF16
-      bandwidth ceiling 分别为 H100 21.7 tok/s、B200 51.7、Rubin 142.3。
-    </p>
 
     <h4>5.3.3 K3V3 Roofline：Compressed Bytes 与 B-only Tile</h4>
     <p>
-      K3V3 加上 BF16 sink/recent 后，effective storage 在 8K 是 3.628 bit/value、32K 是 3.251、1M 是 3.129；
-      对应 arithmetic intensity 为 17.64 / 19.69 / 20.45 FLOP/B。1M 时 Qwen3-4B 的 KV footprint 从 154.6 GB
-      降到约 <strong>30.2 GB</strong>。
+      K3V3 加上 BF16 sink/recent 后，8K 的 effective storage 是 3.628 bit/value，32K 是 3.251 bit/value；
+      对应 arithmetic intensity 为 17.64 / 19.69 FLOP/B。
     </p>
     <div class="table-wrap"><table class="data">
       <thead><tr><th>GPU</th><th class="num">8K Compressed-byte Normalization</th><th class="num">8K tok/s</th><th class="num">32K Compressed-byte Normalization</th><th class="num">32K tok/s</th><th>Native Execution?</th></tr></thead>
@@ -985,7 +1009,7 @@ two K32    = 216 B = 3.375 bit/W，algorithm oracle only（not native LUT-B）</
       <code>Q × Kᵀ</code> / <code>P × V</code> 的方向。
     </p>
     <p>
-      在 audit 最新 decode path 时，我们注意到：
+      有读者向我们指出了最新的 decode kernel，这个观察是对的：
       <a href="https://github.com/flashinfer-ai/flashinfer/blob/b1d95851675b8799d623df4d5a7d6eac3254b3ff/flashinfer/cute_dsl/attention/gqa_decode_paged.py#L222-L259">FlashInfer SM100 CuTe GQA decode kernel</a>
       明确设置 <code>mma_tile_m=128</code>；GEMM1 的 A 是 K、B 是 Q，GEMM2 的 A 是 V、B 是 P。它让
       sequence/head-dim 填满 A 的 M 方向，并把 GQA heads × prediction tokens 填进 B 的 N 方向。需要同时区分
@@ -1000,12 +1024,12 @@ two K32    = 216 B = 3.375 bit/W，algorithm oracle only（not native LUT-B）</
       GQA ratio 是 4，所以一个共享 K/V tile 最多把 4 个 Q heads 打包成 4 行：
     </p>
     <div class="table-wrap"><table class="data">
-      <thead><tr><th>LUT-B Full-Tile Sensitivity</th><th class="num">Optimistic M Occupancy</th><th class="num">Useful Cap</th><th class="num">8K Bound</th><th class="num">32K Bound</th><th class="num">1M Bound</th></tr></thead>
+      <thead><tr><th>LUT-B Full-Tile Sensitivity</th><th class="num">Optimistic M Occupancy</th><th class="num">Useful Cap</th><th class="num">8K Bound</th><th class="num">32K Bound</th></tr></thead>
       <tbody>
-        <tr><td>10% dense FP8：1.75P</td><td class="num">4 / 128 = 3.125%</td><td class="num">54.7 TFLOP/s</td><td class="num">54.7</td><td class="num">54.7</td><td class="num">54.7</td></tr>
-        <tr><td>25% dense FP8：4.375P</td><td class="num">4 / 128 = 3.125%</td><td class="num">136.7 TFLOP/s</td><td class="num">136.7</td><td class="num">136.7</td><td class="num">136.7</td></tr>
-        <tr><td>50% dense FP8：8.75P</td><td class="num">4 / 128 = 3.125%</td><td class="num">273.4 TFLOP/s</td><td class="num">273.4</td><td class="num">273.4</td><td class="num">273.4</td></tr>
-        <tr><td>100% dense endpoint：17.5P</td><td class="num">4 / 128 = 3.125%</td><td class="num">546.9 TFLOP/s</td><td class="num">388.1 HBM-capped</td><td class="num">433.1 HBM-capped</td><td class="num">450.0 HBM-capped</td></tr>
+        <tr><td>10% dense FP8：1.75P</td><td class="num">4 / 128 = 3.125%</td><td class="num">54.7 TFLOP/s</td><td class="num">54.7</td><td class="num">54.7</td></tr>
+        <tr><td>25% dense FP8：4.375P</td><td class="num">4 / 128 = 3.125%</td><td class="num">136.7 TFLOP/s</td><td class="num">136.7</td><td class="num">136.7</td></tr>
+        <tr><td>50% dense FP8：8.75P</td><td class="num">4 / 128 = 3.125%</td><td class="num">273.4 TFLOP/s</td><td class="num">273.4</td><td class="num">273.4</td></tr>
+        <tr><td>100% dense endpoint：17.5P</td><td class="num">4 / 128 = 3.125%</td><td class="num">546.9 TFLOP/s</td><td class="num">388.1 HBM-capped</td><td class="num">433.1 HBM-capped</td></tr>
       </tbody>
     </table></div>
     <p>
@@ -1085,7 +1109,7 @@ two K32    = 216 B = 3.375 bit/W，algorithm oracle only（not native LUT-B）</
       <li><strong>A8 稳定；当前所需 operand position 不支持 A3。</strong>8K–128K 的 A8-only KL₅₀ 都不超过
         0.05375。当前 LUT-B 没有 LUT-A，因此 W3A3/KV3A3 无法用同一条 MMA。</li>
       <li><strong>W3 quality 更依赖算法，而不是“3-bit”这个名字。</strong>H64+GPTQ 是跨模型最稳健的 family；
-        uniform/NF3 会崩溃。更细 two-K32 scaling 会改善部分 quality，但这些 rows 是 non-native oracle；
+        uniform/NF3 会崩溃。更细 two-K32 scaling 会改善部分 quality,这些 rows 现在以两遍掩码 A pass 原生运行(~10% 墙钟溢价);
         只有 one-K64 rows 是 Rubin kernel candidate。</li>
       <li><strong>KV3 需要 nonuniform codebook，困难场景还需要 rotation。</strong>Uniform Qwen K3V3 达到
         PPL 1504/KL₅₀ 5.15；offline Lloyd-Max 把 PPL 拉回约 10.4。Latent OSCAR 把 Kimi K3 从
@@ -1093,13 +1117,13 @@ two K32    = 216 B = 3.375 bit/W，algorithm oracle only（not native LUT-B）</
     </ul>
     <h3>7.2 Performance</h3>
     <ul>
-      <li><strong>Weight mapping 最干净，但旧 headline 只是 byte ceiling。</strong>我们的 data-path guess
+      <li><strong>Weight mapping 最干净，但旧 headline 只是 byte ceiling。</strong>我的 data-path guess
         把 native K64 放在 H100 BF16 weight-only 的 16.32–28.57×，中心为 22.45×；32.33× ceiling 仍要求
         dense FP8 的 79.2%，且尚未计入 non-weight overhead。</li>
       <li><strong>KV 随 context 增长节省更多 bytes，但 decode shape 决定 utilization。</strong>GQA4
         single-token decode 只有 4/128 M-row occupancy；MLA 可让多个 local heads 复用同一 latent，不继承
         相同的 underfill。</li>
-      <li><strong>Qwen GQA4 engineering guess 低于 byte ceiling。</strong>1M 下 40–70% data-path band 是
+      <li><strong>Qwen GQA4 的敏感性区间低于 byte ceiling。</strong>1M 下 <code>r</code> 区间给出的是
         354–619 attention tok/s，中心为 486；page traversal、Q/P conversion、softmax 与 output movement
         会继续降低真实 fused kernel。</li>
     </ul>
@@ -1138,8 +1162,8 @@ git checkout zhongzhu/oscar-int3-rubin-simulate</code></pre>
       <li id="ref-awq">J. Lin et al., <a href="https://arxiv.org/abs/2306.00978">“AWQ: Activation-aware Weight Quantization for LLM Compression and Acceleration,”</a> MLSys 2024.</li>
       <li id="ref-squeezellm">S. Kim et al., <a href="https://arxiv.org/abs/2306.07629">“SqueezeLLM: Dense-and-Sparse Quantization,”</a> ICML 2024.</li>
       <li id="ref-quarot">S. Ashkboos et al., <a href="https://arxiv.org/abs/2404.00456">“QuaRot: Outlier-Free 4-Bit Inference in Rotated LLMs,”</a> NeurIPS 2024.</li>
+      <li id="ref-qlora">T. Dettmers et al., <a href="https://arxiv.org/abs/2305.14314">“QLoRA: Efficient Finetuning of Quantized LLMs,”</a> NeurIPS 2023.</li>
       <li id="ref-quant">R. M. Gray and D. L. Neuhoff, <a href="https://doi.org/10.1109/18.720541">“Quantization,”</a> <i>IEEE Transactions on Information Theory</i>, 1998.</li>
-      <li id="ref-aqlm">V. Egiazarian et al., <a href="https://arxiv.org/abs/2401.06118">“Extreme Compression of Large Language Models via Additive Quantization,”</a> ICML 2024.</li>
       <li><a href="https://developer.nvidia.com/blog/inside-nvidia-rubin-gpu-architecture-powering-the-era-of-agentic-ai/">NVIDIA: Inside NVIDIA Rubin GPU Architecture</a></li>
       <li><a href="https://developer.nvidia.com/blog/inside-the-nvidia-rubin-platform-six-new-chips-one-ai-supercomputer/">NVIDIA: Inside the Vera Rubin Platform</a></li>
       <li><a href="https://www.nvidia.com/en-us/data-center/vera-rubin-nvl72/">NVIDIA: Vera Rubin NVL72 specs</a></li>
@@ -1209,40 +1233,43 @@ function hideTip() { tip.style.display = "none"; }
 const W_METHODS = {
   bf16:    { label: "BF16", full: "BF16 Weight + BF16 Activation Baseline", color: "#4a463c", bits: 16, about: "No weight or activation quantization; this is the native accuracy reference.", kernel: "Dense BF16 GEMM with no LUT, SFB, rotation, or global quantization scale." },
   a8:      { label: "A8-only", full: "BF16 Weight + MXFP8 Activation-Only QDQ", color: "#6e6a5c", bits: 16, about: "Weights remain BF16; activations are quantize-dequantized to E4M3 with one UE8M0 scale per K32 block.", kernel: "Dense BF16 weight GEMM after online A quantization; no LUT-B weight path." },
-  h64:     { label: "H64 · K32 oracle", full: "Hadamard64 + GPTQ + 2K32 Quality Oracle", color: "#3e6b5f", bits: 3.375, nativeLutb: false, about: "A fixed signed Hadamard64 rotation spreads weight outliers, then K64 block-diagonal LUT-GPTQ applies activation-Hessian error compensation.", kernel: "Non-native oracle: PTX 9.4 LUT-B fixes compressed B at K64 and mxf8f6f4 exposes no scale_vec::2X contract for two independently addressed K32 B scales." },
+  h64:     { label: "H64 · 2K32 two-pass", full: "Hadamard64 + GPTQ + 2K32 (two-pass native)", color: "#3e6b5f", bits: 3.375, nativeLutb: false, about: "A fixed random signed Hadamard64 rotation spreads weight outliers, then K64 block-diagonal LUT-GPTQ applies activation-Hessian error compensation.", kernel: "Native as two masked-A K64 LUT-B passes with per-(column, half) FP32 epilogue scaling; ~10% wall clock over one-pass K64." },
   h64_k64g:{ label: "H64 · K64+G", full: "Hadamard64 + GPTQ + K64 + Global Scale", color: "#2f7f6c", bits: 3.25, global: true, nativeLutb: true, about: "The signed Hadamard64 and K64 block-diagonal LUT-GPTQ recipe under the native one-K64 scale schedule.", kernel: "Native candidate: one K64 LUT-B MMA, 8 scale_B=1×N UE8M0 factors per tile, one folded tensor-global FP32 scale, and signed H64 on A." },
-  h64_k32g:{ label: "H64 · 2K32+G oracle", full: "Hadamard64 + GPTQ + 2K32 + Global Scale Quality Oracle", color: "#4d8f68", bits: 3.375, global: true, nativeLutb: false, about: "Signed Hadamard64 first spreads outliers; K64 block-diagonal LUT-GPTQ then compensates quantization error using the calibrated activation Hessian.", kernel: "Non-native oracle with 16 independently fitted K32-local factors; no Rubin LUT-B throughput is assigned." },
-  h64rms_k32: { label: "H64+RMS² · K32 oracle", full: "Hadamard64 + GPTQ + Activation-RMS²-Weighted Lloyd–Max + 2K32 Quality Oracle", color: "#7c8f3a", bits: 3.375, nativeLutb: false, about: "H64 + LUT-GPTQ pipeline，Lloyd–Max codebook 按校准 activation RMS² 加权；按种子配对的分析显示这项加权对 KL 的影响在一个 rotation-seed sigma 之内。", kernel: "非原生 oracle，两组 K32 scale。MiniMax 单元格与 H64 · K32 oracle 共享：routed pipeline 的 codebook 本来就始终是 RMS² 加权的。" },
-  h64rms_k32g: { label: "H64+RMS² · 2K32+G oracle", full: "Hadamard64 + GPTQ + Activation-RMS²-Weighted Lloyd–Max + 2K32 + Global Scale Quality Oracle", color: "#96833c", bits: 3.375, global: true, nativeLutb: false, about: "RMS² 加权的 H64 + LUT-GPTQ pipeline，配更细的 two-K32 schedule 与一个 tensor-global FP32 scale；在 Qwen/Gemma 上与无加权版的差距在一个 rotation-seed sigma 之内。", kernel: "非原生 oracle，16 个独立拟合的 K32-local UE8M0 factor 加 global scale。MiniMax 单元格与 H64 · 2K32+G oracle 共享：routed pipeline 的 codebook 本来就始终是 RMS² 加权的。" },
-  h64_inter_k64g: { label: "H64 · inter-r1 · K64+G", full: "Hadamard64 + One Codebook/GPTQ Alternation + K64 + Global Scale", color: "#1f7a8c", bits: 3.25, global: true, nativeLutb: true, about: "在原生 H64 配方上做一轮离线 Hessian 加权 Lloyd codebook M-step 与 GPTQ 重跑的交替（inter-LM-GPTQ round 1）；按种子配对在 dense 模型上有小而一致的增益，Qwen 128K 原生 KL 最优；但在 MiniMax routed experts 上同样的交替反而变差（per-expert Hessian 饥饿）。", kernel: "原生候选，runtime contract 与 H64 · K64+G 完全一致——一次 K64 LUT-B MMA、8 个 UE8M0 SFB、折叠的 tensor-global FP32 scale、A 侧 signed H64；交替只发生在离线。" },
-  rms:     { label: "RMS² · K32 oracle", full: "Activation-RMS²-Weighted Lloyd–Max + 2K32 Quality Oracle", color: "#31607f", bits: 3.375, nativeLutb: false, about: "Tile-local Lloyd–Max fitting weights each reconstruction error by the calibrated squared RMS of its activation channel.", kernel: "Non-native oracle with two K32 scale groups; all RMS² weighting is offline." },
+  h64_k32g:{ label: "H64 · 2K32+G two-pass", full: "Hadamard64 + GPTQ + 2K32 + Global Scale (two-pass native)", color: "#4d8f68", bits: 3.375, global: true, nativeLutb: false, about: "Signed Hadamard64 first spreads outliers; K64 block-diagonal LUT-GPTQ then compensates quantization error using the calibrated activation Hessian.", kernel: "Native as two masked-A K64 LUT-B passes with per-(column, half) FP32 epilogue scaling; ~10% wall clock over one-pass K64." },
+  rms:     { label: "RMS² · 2K32 two-pass", full: "Activation-RMS²-Weighted Lloyd–Max + 2K32 (two-pass native)", color: "#31607f", bits: 3.375, nativeLutb: false, about: "Tile-local Lloyd–Max fitting weights each reconstruction error by the calibrated squared RMS of its activation channel.", kernel: "Native as two masked-A K64 LUT-B passes with per-(column, half) FP32 epilogue scaling; ~10% wall clock over one-pass K64." },
   rms_k64g:{ label: "RMS² · K64+G", full: "Activation-RMS²-Weighted Lloyd–Max + K64 + Global Scale", color: "#4d55a5", bits: 3.25, global: true, nativeLutb: true, about: "The RMS²-weighted Lloyd–Max codebook is fitted offline, then paired with native one-K64 block scaling and a tensor-global scale.", kernel: "Native candidate: one K64 LUT-B MMA, 8 scale_B=1×N UE8M0 factors per tile, and one folded tensor-global FP32 scale." },
-  rms_k32g:{ label: "RMS² · 2K32+G oracle", full: "Activation-RMS²-Weighted Lloyd–Max + 2K32 + Global Scale Quality Oracle", color: "#6971b8", bits: 3.375, global: true, nativeLutb: false, about: "The same offline RMS²-weighted Lloyd–Max fitting, with finer K32-local scaling plus one tensor-global scale.", kernel: "Non-native oracle with 16 independently fitted K32-local factors; no Rubin LUT-B throughput is assigned." },
-  gptq:    { label: "K64 GPTQ oracle", full: "K64 Block-Diagonal LUT-GPTQ Two-K32 Quality Oracle", color: "#5b4b91", bits: 3.375, nativeLutb: false, about: "Activation-Hessian column ordering and error compensation are performed offline while the output remains scalar 3-bit indices into eight E4M3 centroids.", kernel: "The measured row used the non-native two-K32 scale oracle; a native K64 rerun is required before assigning speed." },
-  scale:   { label: "Scale+LM oracle", full: "UE8M0 Scale-Search + Lloyd–Max Two-K32 Quality Oracle", color: "#b07c2b", bits: 3.375, nativeLutb: false, about: "Offline fitting alternates UE8M0 B-scale selection with Lloyd–Max updates of the eight E4M3 centroids.", kernel: "The 16-factor two-K32 descriptor is an algorithm oracle, not a PTX 9.4 mxf8f6f4 LUT-B contract." },
-  awq:     { label: "Folded AWQ oracle", full: "Folded Activation-Aware Weight Quantization + Lloyd–Max Two-K32 Oracle", color: "#a04f2d", bits: 3.375, nativeLutb: false, about: "Activation-aware channel balancing is calibrated first, folded into supported RMSNorm/consumer weights, and followed by tile-local Lloyd–Max fitting.", kernel: "The measured row used non-native two-K32 scaling; supported dense folds add no runtime multiply, but no Rubin LUT-B speed is assigned." },
-  lm:      { label: "Lloyd-Max oracle", full: "Tile-Local Lloyd–Max Two-K32 Quality Oracle", color: "#8a6a14", bits: 3.375, nativeLutb: false, about: "Each K64×N8 weight tile fits eight nonuniform centroids by nearest-center assignment and centroid updates, then rounds the final codebook to E4M3.", kernel: "The measured 16-factor K32-local scale layout is non-native; MiniMax quantizes routed-expert w13/w2 weights only." },
-  squeeze: { label: "SqueezeLLM oracle", full: "Dense-Only Fisher-Weighted SqueezeLLM Two-K32 Oracle", color: "#5d7f79", bits: 3.375, nativeLutb: false, about: "Squared per-sample gradients form a diagonal empirical-Fisher weight for tile-local Lloyd–Max fitting; the sparse outlier residual is intentionally omitted.", kernel: "The result uses the non-native two-K32 quality contract; MiniMax uses a factorized-Fisher proxy." },
-  nf3:     { label: "NF3 oracle", full: "Zero-Aware NormalFloat-3 Two-K32 Quality Oracle", color: "#b55f5f", bits: 3.375, nativeLutb: false, about: "A static normal-distribution-inspired eight-level codebook is adapted to include an exact zero, without per-tile iterative optimization.", kernel: "The measured row uses the non-native 16-factor scale oracle; only the offline centroid rule differs." },
-  uniform: { label: "Uniform oracle", full: "Uniform Scalar LUT Two-K32 Quality Oracle", color: "#a33d2f", bits: 3.375, nativeLutb: false, about: "Each tile uses eight evenly spaced reconstruction levels, providing the simplest 3-bit numerical baseline.", kernel: "The measured row uses the non-native two-K32 scale oracle and receives no Rubin speed estimate." },
+  rms_k32g:{ label: "RMS² · 2K32+G two-pass", full: "Activation-RMS²-Weighted Lloyd–Max + 2K32 + Global Scale (two-pass native)", color: "#6971b8", bits: 3.375, global: true, nativeLutb: false, about: "The same offline RMS²-weighted Lloyd–Max fitting, with finer K32-local scaling plus one tensor-global scale.", kernel: "Native as two masked-A K64 LUT-B passes with per-(column, half) FP32 epilogue scaling; ~10% wall clock over one-pass K64." },
+  gptq:    { label: "K64 GPTQ 2K32 two-pass", full: "K64 Block-Diagonal LUT-GPTQ Two-K32 (two-pass native)", color: "#5b4b91", bits: 3.375, nativeLutb: false, about: "Activation-Hessian column ordering and error compensation are performed offline while the output remains scalar 3-bit indices into eight E4M3 centroids.", kernel: "The measured row uses the two-K32 schedule, which runs natively as two masked-A K64 passes (~10% wall clock over one-pass K64)." },
+  scale:   { label: "Scale+LM two-pass", full: "UE8M0 Scale-Search + Lloyd–Max Two-K32 (two-pass native)", color: "#b07c2b", bits: 3.375, nativeLutb: false, about: "Offline fitting alternates UE8M0 B-scale selection with Lloyd–Max updates of the eight E4M3 centroids.", kernel: "The 16-factor two-K32 descriptor runs natively as two masked-A K64 passes; no single mxf8f6f4 MMA carries it." },
+  awq:     { label: "Folded AWQ two-pass", full: "Folded Activation-Aware Weight Quantization + Lloyd–Max Two-K32 (two-pass native)", color: "#a04f2d", bits: 3.375, nativeLutb: false, about: "Activation-aware channel balancing is calibrated first, folded into supported RMSNorm/consumer weights, and followed by tile-local Lloyd–Max fitting.", kernel: "The measured row used non-native two-K32 scaling; supported dense folds add no runtime multiply, but no Rubin LUT-B speed is assigned." },
+  lm:      { label: "Lloyd-Max two-pass", full: "Tile-Local Lloyd–Max Two-K32 (two-pass native)", color: "#8a6a14", bits: 3.375, nativeLutb: false, about: "Each K64×N8 weight tile fits eight nonuniform centroids by nearest-center assignment and centroid updates, then rounds the final codebook to E4M3.", kernel: "The measured 16-factor K32-local scale layout is non-native; MiniMax quantizes routed-expert w13/w2 weights only." },
+  squeeze: { label: "SqueezeLLM two-pass", full: "Dense-Only Fisher-Weighted SqueezeLLM Two-K32 (two-pass native)", color: "#5d7f79", bits: 3.375, nativeLutb: false, about: "Squared per-sample gradients form a diagonal empirical-Fisher weight for tile-local Lloyd–Max fitting; the sparse outlier residual is intentionally omitted.", kernel: "The result uses the non-native two-K32 quality contract; MiniMax uses a factorized-Fisher proxy." },
+  nf3:     { label: "NF3 two-pass", full: "Zero-Aware NormalFloat-3 Two-K32 (two-pass native)", color: "#b55f5f", bits: 3.375, nativeLutb: false, about: "A static normal-distribution-inspired eight-level codebook is adapted to include an exact zero, without per-tile iterative optimization.", kernel: "The measured row uses the 16-factor two-K32 schedule (native as two masked-A passes); only the offline centroid rule differs." },
+  uniform: { label: "Uniform two-pass", full: "Uniform Scalar LUT Two-K32 (two-pass native)", color: "#a33d2f", bits: 3.375, nativeLutb: false, about: "Each tile uses eight evenly spaced reconstruction levels, providing the simplest 3-bit numerical baseline.", kernel: "Two-K32 schedule; native as two masked-A K64 passes (~10% wall clock)." },
 };
 const W_DATA = {
   qwen: { label: "Qwen3-4B", values: {
-    8192:   { bf16:[9.447,0], a8:[9.508,.00559], h64:[11.504,.24232], h64_k64g:[11.664,.24494], h64_k32g:[11.500,.27527], h64rms_k32:[11.470,.26471], h64rms_k32g:[11.620,.26030], h64_inter_k64g:[11.560,.24325], gptq:[13.057,.34194], rms:[12.890,.38058], rms_k64g:[13.215,.40095], rms_k32g:[12.640,.36268], awq:[13.813,.38270], lm:[13.580,.41725], scale:[14.148,.44276], squeeze:[14.551,.48394], nf3:[30.295,1.35188], uniform:[91.387,2.26996] },
-    65536:  { bf16:[8.702,0], a8:[8.766,.00547], h64:[10.692,.21438], h64_k64g:[10.944,.23894], h64_k32g:[10.744,.25162], rms:[11.813,.32821], rms_k64g:[12.268,.39814], rms_k32g:[11.792,.34422], h64rms_k32:[10.700,.27513], h64rms_k32g:[10.859,.25601], h64_inter_k64g:[10.792,.24056], gptq:[12.451,.36228], scale:[12.930,.40136], awq:[12.764,.41050], lm:[12.701,.43991], squeeze:[13.231,.49338], nf3:[29.279,1.44343], uniform:[113.677,2.79120] },
-    131072: { bf16:[8.482,0], a8:[8.547,.00504], h64:[10.504,.28601], h64_k64g:[10.899,.26852], h64_k32g:[10.643,.25499], rms:[11.613,.36921], rms_k64g:[12.188,.43398], rms_k32g:[11.653,.39943], h64rms_k32:[10.607,.31554], h64rms_k32g:[10.803,.28762], h64_inter_k64g:[10.671,.25061], gptq:[12.471,.38442], scale:[12.845,.43388], awq:[12.666,.45302], lm:[12.703,.48603], squeeze:[13.332,.49994], nf3:[29.646,1.26669], uniform:[162.126,2.89007] },
+    8192:   { bf16:[9.447,0], a8:[9.508,.00559], h64:[11.504,.24232], h64_k64g:[11.664,.24494], h64_k32g:[11.500,.27527], gptq:[13.057,.34194], rms:[12.890,.38058], rms_k64g:[13.215,.40095], rms_k32g:[12.640,.36268], awq:[13.813,.38270], lm:[13.580,.41725], scale:[14.148,.44276], squeeze:[14.551,.48394], nf3:[30.295,1.35188], uniform:[91.387,2.26996] },
+    65536:  { bf16:[8.702,0], a8:[8.766,.00547], h64:[10.692,.21438], h64_k64g:[10.944,.23894], h64_k32g:[10.744,.25162], rms:[11.813,.32821], rms_k64g:[12.268,.39814], rms_k32g:[11.792,.34422], gptq:[12.451,.36228], scale:[12.930,.40136], awq:[12.764,.41050], lm:[12.701,.43991], squeeze:[13.231,.49338], nf3:[29.279,1.44343], uniform:[113.677,2.79120] },
+    131072: { bf16:[8.482,0], a8:[8.547,.00504], h64:[10.504,.28601], h64_k64g:[10.899,.26852], h64_k32g:[10.643,.25499], rms:[11.613,.36921], rms_k64g:[12.188,.43398], rms_k32g:[11.653,.39943], gptq:[12.471,.38442], scale:[12.845,.43388], awq:[12.666,.45302], lm:[12.703,.48603], squeeze:[13.332,.49994], nf3:[29.646,1.26669], uniform:[162.126,2.89007] },
   }},
   gemma: { label: "Gemma4-12B", values: {
-    8192:   { bf16:[6.479,0], a8:[6.527,.03256], h64:[7.924,.34988], h64_k64g:[8.021,.37371], h64_k32g:[7.938,.35687], h64rms_k32:[7.920,.35003], h64rms_k32g:[7.930,.35212], h64_inter_k64g:[7.746,.35615], gptq:[8.724,.47879], rms:[8.811,.51076], rms_k64g:[9.788,.55411], rms_k32g:[9.205,.48147], awq:[11.695,.77928], squeeze:[12.625,.87529], lm:[128.983,3.23424], scale:[156.667,3.49639], nf3:[4617.446,6.32933], uniform:[10701.342,7.45766] },
-    65536:  { bf16:[5.828,0], a8:[5.844,.00689], h64:[7.101,.34171], h64_k64g:[7.208,.44184], h64_k32g:[7.128,.34907], h64rms_k32:[7.104,.28649], h64rms_k32g:[7.120,.34307], h64_inter_k64g:[6.997,.47818], gptq:[7.886,.47953], rms:[7.824,.57771], rms_k64g:[8.515,.65772], rms_k32g:[8.256,.51175], awq:[10.917,.72734], squeeze:[11.146,1.06351], scale:[161.081,3.33806], lm:[168.717,3.55087], nf3:[4017.948,6.40578], uniform:[18271.539,7.89921] },
-    131072: { bf16:[5.771,0], a8:[5.786,.02114], h64:[7.034,.37273], h64_k64g:[7.169,.27815], h64_k32g:[7.067,.37087], h64rms_k32:[7.043,.34431], h64rms_k32g:[7.082,.34986], h64_inter_k64g:[6.954,.38775], gptq:[7.822,.50819], rms:[7.706,.55274], rms_k64g:[8.395,.65079], rms_k32g:[8.247,.61031], awq:[10.719,.83232], squeeze:[11.180,1.02137], scale:[193.054,3.54611], lm:[180.144,3.67195], nf3:[4358.944,6.57245], uniform:[19733.351,7.98959] },
+    8192:   { bf16:[6.479,0], a8:[6.527,.03256], h64:[7.924,.34988], h64_k64g:[8.021,.37371], h64_k32g:[7.938,.35687], gptq:[8.724,.47879], rms:[8.811,.51076], rms_k64g:[9.788,.55411], rms_k32g:[9.205,.48147], awq:[11.695,.77928], squeeze:[12.625,.87529], lm:[128.983,3.23424], scale:[156.667,3.49639], nf3:[4617.446,6.32933], uniform:[10701.342,7.45766] },
+    65536:  { bf16:[5.828,0], a8:[5.844,.00689], h64:[7.101,.34171], h64_k64g:[7.208,.44184], h64_k32g:[7.128,.34907], gptq:[7.886,.47953], rms:[7.824,.57771], rms_k64g:[8.515,.65772], rms_k32g:[8.256,.51175], awq:[10.917,.72734], squeeze:[11.146,1.06351], scale:[161.081,3.33806], lm:[168.717,3.55087], nf3:[4017.948,6.40578], uniform:[18271.539,7.89921] },
+    131072: { bf16:[5.771,0], a8:[5.786,.02114], h64:[7.034,.37273], h64_k64g:[7.169,.27815], h64_k32g:[7.067,.37087], gptq:[7.822,.50819], rms:[7.706,.55274], rms_k64g:[8.395,.65079], rms_k32g:[8.247,.61031], awq:[10.719,.83232], squeeze:[11.180,1.02137], scale:[193.054,3.54611], lm:[180.144,3.67195], nf3:[4358.944,6.57245], uniform:[19733.351,7.98959] },
   }},
   minimax: { label: "MiniMax-M3 routed", values: {
-    8192:   { bf16:[5.105,0], a8:[5.109,.05375], h64:[6.209,.27195], h64_k64g:[6.130,.23194], h64_k32g:[6.228,.28072], awq:[6.203,.32739], h64rms_k32:[6.209,.27195], h64rms_k32g:[6.228,.28072], h64_inter_k64g:[6.230,.32464], gptq:[6.555,.40402], squeeze:[7.642,.56452], rms:[7.591,.58726], rms_k64g:[5.983,.29160], rms_k32g:[5.978,.30157], lm:[8.611,.67041], scale:[9.206,.74972], uniform:[617957.852,12.18981], nf3:[2104450.529,13.37978] },
-    65536:  { bf16:[4.306,0], a8:[4.293,.03330], h64:[5.299,.31414], h64_k64g:[5.265,.31120], h64_k32g:[5.278,.31379], h64rms_k32:[5.299,.31414], h64rms_k32g:[5.278,.31379], h64_inter_k64g:[5.391,.36262], gptq:[5.593,.37435], awq:[5.555,.41773], rms:[6.651,.54967], rms_k64g:[5.225,.29669], rms_k32g:[5.197,.33921], squeeze:[6.702,.55930], lm:[7.613,.66020], scale:[8.028,.68932], uniform:[536027.492,12.22787], nf3:[2036118.895,13.51801] },
-    131072: { bf16:[4.124,0], a8:[4.115,.01756], h64:[5.076,.20916], h64_k64g:[5.078,.23976], h64_k32g:[5.032,.21195], h64rms_k32:[5.076,.20916], h64rms_k32g:[5.032,.21195], h64_inter_k64g:[5.183,.26777], gptq:[5.327,.24296], awq:[5.404,.29059], rms:[6.474,.42795], rms_k64g:[5.014,.17007], rms_k32g:[4.986,.18677], squeeze:[6.513,.43720], lm:[7.488,.58320], scale:[7.835,.65367], uniform:[535932.314,12.15861], nf3:[2032820.392,13.30284] },
-  }},};
-const wState = { model: "qwen", ctx: 131072, method: "h64_k64g", view: "all" };
+    8192:   { bf16:[5.105,0], a8:[5.109,.05375], h64:[6.209,.27195], h64_k64g:[6.130,.23194], h64_k32g:[6.228,.28072], awq:[6.203,.32739], gptq:[6.555,.40402], squeeze:[7.642,.56452], rms:[7.591,.58726], rms_k64g:[5.983,.29160], rms_k32g:[5.978,.30157], lm:[8.611,.67041], scale:[9.206,.74972], uniform:[617957.852,12.18981], nf3:[2104450.529,13.37978] },
+    65536:  { bf16:[4.306,0], a8:[4.293,.03330], h64:[5.299,.31414], h64_k64g:[5.265,.31120], h64_k32g:[5.278,.31379], gptq:[5.593,.37435], awq:[5.555,.41773], rms:[6.651,.54967], rms_k64g:[5.225,.29669], rms_k32g:[5.197,.33921], squeeze:[6.702,.55930], lm:[7.613,.66020], scale:[8.028,.68932], uniform:[536027.492,12.22787], nf3:[2036118.895,13.51801] },
+    131072: { bf16:[4.124,0], a8:[4.115,.01756], h64:[5.076,.20916], h64_k64g:[5.078,.23976], h64_k32g:[5.032,.21195], gptq:[5.327,.24296], awq:[5.404,.29059], rms:[6.474,.42795], rms_k64g:[5.014,.17007], rms_k32g:[4.986,.18677], squeeze:[6.513,.43720], lm:[7.488,.58320], scale:[7.835,.65367], uniform:[535932.314,12.15861], nf3:[2032820.392,13.30284] },
+  }},
+};
+const W_REAL = {"qwen":{"values":{"8192":{"h64":[11.538,0.23758],"h64_k64g":[11.622,0.23918],"h64_k32g":[11.531,0.28139],"gptq":[13.522,0.39891],"rms_k32g":[12.64,0.35821],"rms":[12.891,0.37794],"awq":[13.742,0.38976],"rms_k64g":[13.213,0.40509],"lm":[13.576,0.42486],"scale":[14.068,0.41719],"squeeze":[14.431,0.47357],"nf3":[30.353,1.34192],"uniform":[91.618,2.26101]},"65536":{"h64_k64g":[10.93,0.23603],"h64_k32g":[10.74,0.25634],"rms":[11.817,0.34001],"rms_k32g":[11.798,0.34645],"gptq":[12.843,0.40965],"rms_k64g":[12.255,0.40192],"scale":[13.112,0.40381],"awq":[12.733,0.41184],"lm":[12.474,0.38259],"squeeze":[13.299,0.48954],"nf3":[29.184,1.42137],"uniform":[114.025,2.79421]},"131072":{"h64_k32g":[10.626,0.27682],"h64_k64g":[10.874,0.26769],"h64":[10.481,0.28177],"rms":[11.622,0.37312],"gptq":[12.948,0.42247],"rms_k32g":[11.661,0.39763],"scale":[12.971,0.48341],"rms_k64g":[12.165,0.43008],"awq":[12.65,0.46001],"lm":[12.456,0.46883],"nf3":[29.683,1.27658],"uniform":[162.826,2.88887]}}},"gemma":{"values":{"8192":{"h64":[7.842,0.36278],"h64_k64g":[8.103,0.36595],"h64_k32g":[7.887,0.3668],"gptq":[9.021,0.52526],"rms_k32g":[9.215,0.47175],"rms":[8.8,0.611],"awq":[11.561,0.7975],"rms_k64g":[9.836,0.57682],"lm":[99.142,2.98828],"scale":[195.458,3.71787],"squeeze":[12.694,0.88761],"nf3":[4743.658,6.25611],"uniform":[10070.909,7.32568]},"65536":{"h64":[7.095,0.29444],"h64_k64g":[7.29,0.37356],"h64_k32g":[7.106,0.32293],"rms":[7.804,0.53793],"rms_k32g":[8.253,0.503],"gptq":[8.163,0.5109],"rms_k64g":[8.623,0.69624],"scale":[314.794,4.01278],"awq":[10.486,0.78309],"lm":[135.884,3.31466],"squeeze":[11.568,1.08708],"nf3":[4183.243,6.3634],"uniform":[19422.877,7.96091]},"131072":{"h64_k32g":[7.047,0.31367],"h64":[7.024,0.34384],"rms":[7.709,0.51545],"gptq":[8.095,0.55091],"rms_k32g":[8.238,0.66169],"scale":[317.63,4.02389],"rms_k64g":[8.4,0.6524],"awq":[10.691,0.87243],"lm":[136.72,3.24481],"nf3":[4426.458,6.53758],"uniform":[20692.879,7.99259]}}},"minimax":{"values":{"8192":{"rms_k32g":[6.124,0.30928],"rms":[7.903,0.68912],"rms_k64g":[6.191,0.32657],"lm":[9.021,0.82944],"scale":[9.71,0.91893],"nf3":[2189871.0,13.43664],"uniform":[640419.0,12.17143]},"65536":{"rms_k64g":[5.338,0.24247]},"131072":{"rms_k64g":[5.101,0.25155]}}}};
+function activeWeightValues() {
+  if (wState.src === "real") return (W_REAL[wState.model].values[wState.ctx]) || {};
+  return W_DATA[wState.model].values[wState.ctx];
+}
+const wState = { model: "qwen", ctx: 131072, method: "h64_k64g", view: "all", src: "sim" };
 
 /* ============================================================
    Data — Qwen3-4B-Thinking-2507
@@ -1259,9 +1286,9 @@ const MODELS = {
         desc: "Full-precision baseline \u2014 no KV quantization." },
       { key: "uniform",  label: "Uniform \u00b7 3-bit",    color: "#a33d2f", bits: 3,  ppl: 1504.444, kl: 5.14717, qp: "BF16 Q/P",          kind: "k3v3",
         desc: "Eight evenly spaced levels, no rotation, no fitted codebook \u2014 \u201cjust store INT3\u201d. It collapses." },
-      { key: "lm",       label: "Lloyd-Max \u00b7 3-bit",  color: "#31607f", bits: 3,  ppl: 10.407,   kl: 0.09665, qp: "FP8/UE8M0 Q/P",     kind: "k3v3", hw: true,
+      { key: "lm",       label: "Lloyd-Max \u00b7 3-bit",  color: "#31607f", bits: 3,  ppl: 10.407,   kl: 0.09665, qp: "FP8/UE8M0 Q/P",     kind: "k3v3", hw: true, realPpl: 10.288, realKl: 0.07723,
         desc: "Corrected P-QDQ: FP32 denominator first, then quantize P only for PV. The old 10.434/0.10447 gap was largely ordering error." },
-      { key: "oscar_lm", label: "OSCAR+LM \u00b7 3-bit",   color: "#8a6a14", bits: 3,  ppl: 10.465,   kl: 0.10090, qp: "FP8/UE8M0 Q/P",     kind: "k3v3", hw: true,
+      { key: "oscar_lm", label: "OSCAR+LM \u00b7 3-bit",   color: "#8a6a14", bits: 3,  ppl: 10.465,   kl: 0.10090, qp: "FP8/UE8M0 Q/P",     kind: "k3v3", hw: true, realPpl: 10.359, realKl: 0.13881,
         desc: "Legacy prefix-denominator ordering; corrected OSCAR P-QDQ rerun is still pending." },
       { key: "int2",     label: "OSCAR \u00b7 2-bit",      color: "#3e6b5f", bits: 2,  ppl: 9.893,    kl: 0.10791, qp: "BF16 Q/P",          kind: "ref",
         desc: "OSCAR INT2 reference recipe (no Lloyd-Max). Rubin's LUT-B index is 3-bit, so this row is accuracy-only." },
@@ -1307,11 +1334,16 @@ function speedAt(ctx) {
   };
 }
 
-const hx = { model: "qwen", preset: "lm", ctx: 1048576, layout: "single", klView: "focus" };
+const hx = { model: "qwen", preset: "lm", ctx: 1048576, layout: "single", klView: "focus", src: "sim" };
+function hxEff(p) {
+  if (hx.src === "real" && p.realPpl !== undefined)
+    return Object.assign({}, p, { ppl: p.realPpl, kl: p.realKl });
+  return p;
+}
 const curModel = () => MODELS[hx.model];
 const curPreset = () => {
   const M = curModel();
-  return M.presets.find(p => p.key === hx.preset) || M.presets[M.presets.length - 1];
+  return hxEff(M.presets.find(p => p.key === hx.preset) || M.presets[M.presets.length - 1]);
 };
 
 /* ============================================================
@@ -1344,7 +1376,7 @@ function selectMenu(containerId, items, current, onPick) {
 }
 
 function weightRows() {
-  const values = W_DATA[wState.model].values[wState.ctx];
+  const values = activeWeightValues();
   return Object.entries(values).map(([key, pair]) => ({
     key, ppl: pair[0], kl: pair[1], ...W_METHODS[key],
   }));
@@ -1443,7 +1475,8 @@ function payloadRow(host, name, bits, color) {
 
 function renderWeight() {
   const model = W_DATA[wState.model];
-  const values = model.values[wState.ctx];
+  const values = activeWeightValues();
+  if (!Object.keys(values).length) { wState.src = "sim"; renderWeight(); return; }
   if (!values[wState.method]) wState.method = values.h64 ? "h64" : Object.keys(values)[0];
   const row = { key:wState.method, ppl:values[wState.method][0], kl:values[wState.method][1], ...W_METHODS[wState.method] };
   seg("wSegModel", Object.entries(W_DATA).map(([k,v]) => [k,v.label]), wState.model, k => {
@@ -1457,6 +1490,9 @@ function renderWeight() {
     if (values[k][1] > 1) wState.view="all";
     renderWeight();
   });
+  seg("wSegSrc", [["sim","模拟 QDQ"],["real","Rubin 原生实测"]], wState.src, k => {
+    wState.src=k; renderWeight();
+  });
   seg("wSegView", [["focus","Quality range (KL\u22641)"],["all","All methods"]], wState.view, k => {
     wState.view=k;
     if (k === "focus" && values[wState.method][1] > 1) wState.method = values.h64 ? "h64" : Object.keys(values)[0];
@@ -1464,7 +1500,7 @@ function renderWeight() {
   });
   $("wxKl").textContent = row.kl.toFixed(5);
   $("wxKl").style.color = row.color;
-  $("wxPpl").textContent = "PPL "+row.ppl.toFixed(3)+" · "+model.label+" @ "+(wState.ctx/1024)+"K";
+  $("wxPpl").textContent = "PPL "+row.ppl.toFixed(3)+" · "+model.label+" @ "+(wState.ctx/1024)+"K"+(wState.src === "real" ? " · 原生实测" : "");
   const h100Ceiling = 22 / 3.35 * 16 / row.bits;
   const guessedH100 = fraction => Math.min(
     h100Ceiling,
@@ -1479,7 +1515,7 @@ function renderWeight() {
     );
   $("wxBits").style.color = row.color;
   $("wxRatio").textContent = row.nativeLutb === false
-    ? "quality oracle only · no native PTX 9.4 LUT-B schedule"
+    ? "two-K32 · runs natively as two masked-A K64 passes (~10% wall clock)"
     : (
       row.bits < 16
         ? "40\u201370% guess: "+guessedH100(.40).toFixed(1)+"\u2013"+
@@ -1508,7 +1544,7 @@ function renderWeight() {
     '<div class="method-line faint">'+(
       row.nativeLutb === false
         ? "This row has no Rubin kernel speed estimate."
-        : "The estimate uses a 40\u201370% full-tile engineering guess centered at 55%; the larger byte-only ceiling still requires LUT-B near the dense-FP8 rate."
+        : "The estimate is a sensitivity band over the full-tile LUT-B rate; the byte-only ceiling requires that rate near dense FP8, which is also its architectural ceiling."
     )+'</div>';
   renderWeightChart();
 }
@@ -1546,7 +1582,7 @@ function renderChart() {
   const M = curModel();
   const focusMax = M.speed ? 0.15 : M.klMax;
   const presets = hx.klView === "focus"
-    ? M.presets.filter(p => p.kl <= focusMax)
+    ? M.presets.filter(p => hxEff(p).kl <= focusMax)
     : M.presets;
   const hiKL = hx.klView === "focus" ? focusMax : M.klMax;
   const X = (v) => mL + (v / hiKL) * innerW;
@@ -1572,7 +1608,7 @@ function renderChart() {
 
   /* beeswarm dodge for near-identical KL values */
   const cy = mT + (plotBot - mT) / 2;
-  const dots = presets.map(p => ({ p, x: X(p.kl), lvl: 0 }))
+  const dots = presets.map(pp => hxEff(pp)).map(p => ({ p, x: X(p.kl), lvl: 0 }))
     .sort((a, b) => a.x - b.x);
   const placed = [];
   dots.forEach(d => {
@@ -1683,7 +1719,7 @@ function renderSpeed() {
       fmtTok(sp.p40)+" / "+fmtTok(sp.p55)+" / "+fmtTok(sp.p70);
     $("hxTok").style.color = "#8a6a14";
     $("hxTokSub").textContent =
-      "40% lower / 55% center / 70% upper engineering guess";
+      "LUT-B rate sensitivity: r = 0.50 / 0.65 / 0.79";
   } else if (p.kind === "bf16") {
     $("hxTok").textContent = fmtTok(sp.rubinBF16);
     $("hxTok").style.color = "#4a463c";
@@ -1702,7 +1738,7 @@ function renderSpeed() {
   if (p.kind === "k3v3") {
     barRow(host, "K3V3 \u00b7 lower guess 40%", sp.p40, max, "#b3ac94",
       { valText: fmtTok(sp.p40) + " \u00b7 " + fmtX(sp.p40 / sp.h100) });
-    barRow(host, "K3V3 \u00b7 center guess 55%", sp.p55, max, "#8f8978",
+    barRow(host, "K3V3 \u00b7 r = 0.65", sp.p55, max, "#8f8978",
       { valText: fmtTok(sp.p55) + " \u00b7 " + fmtX(sp.p55 / sp.h100) });
     barRow(host, "K3V3 \u00b7 upper guess 70%", sp.p70, max, "#a97f19",
       { valText: fmtTok(sp.p70) + " \u00b7 " + fmtX(sp.p70 / sp.h100) });
@@ -1735,7 +1771,7 @@ function renderCaption() {
   const ctxL = CTX_LABEL[hx.ctx];
   let html;
   if (p.kind === "k3v3") {
-    html = p.desc + " At " + ctxL + ", the 40% / 55% / 70% data-path engineering guesses give <b>" +
+    html = p.desc + " At " + ctxL + ", LUT-B rates of r = 0.50 / 0.65 / 0.79 give <b>" +
       fmtTok(sp.p40)+" / "+fmtTok(sp.p55)+" / "+fmtTok(sp.p70) +
       "</b> attention tok/s. The center guess reflects integrated lookup but discounts dense-FP8 parity for the " +
       "48B-to-24B descriptor fetch, TMEM LUT staging, and collector dependencies. This remains unmeasured.";
@@ -1770,6 +1806,10 @@ function render() {
   });
   seg("segCtx", [[8192, "8K"], [32768, "32K"], [1048576, "1M"]], hx.ctx, (k) => { hx.ctx = +k; render(); });
   seg("segLayout", [["single", "Single copy + retile"], ["dual", "Two direct layouts"]], hx.layout, (k) => { hx.layout = k; render(); });
+  seg("segHxSrc", [["sim", "模拟 QDQ"], ["real", "Rubin 原生注意力"]], hx.src, (k) => {
+    hx.src = k;
+    render();
+  });
   seg("segKlView", [["focus", "Quality range"], ["all", "All methods"]], hx.klView, (k) => {
     hx.klView = k;
     if (k === "focus" && M.speed && curPreset().kl > 0.15) hx.preset = "oscar_lm";
@@ -1778,6 +1818,7 @@ function render() {
   $("ctxCtrl").style.display = M.speed ? "" : "none";
   $("layoutCtrl").style.display = M.speed ? "none" : "";
   $("klCtrl").style.display = M.speed ? "" : "none";
+  $("hxSrcCtrl").style.display = M.speed ? "" : "none";
   renderAccuracy();
   renderSpeed();
   renderCaption();
