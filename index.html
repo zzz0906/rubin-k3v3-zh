@@ -5,6 +5,14 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Vera Rubin LUT-B：3-bit Weight、Activation 与 KV 的 Accuracy-First 实验</title>
 <meta name="description" content="准确讨论 Vera Rubin LUT-B 的 W3A8 weight、当前不受支持的 A3 路径与 K3V3 cache，包括 K64xN8 分组、实测精度、kernel bound 与 request-level HBM capacity arithmetic。">
+<script>
+  {
+    const mode = new URLSearchParams(window.location.search).get("embed");
+    if (mode === "weight" || mode === "kv") {
+      document.documentElement.dataset.embed = mode;
+    }
+  }
+</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;0,6..72,700;1,6..72,400;1,6..72,500&family=Noto+Sans+SC:wght@400;500;600;700&family=Noto+Serif+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -249,6 +257,29 @@
     .bar-track { grid-column: 1; }
     .bar-val { grid-column: 2; }
     .bar-track { height: 20px; }
+  }
+
+  /* 供 /verarubin-short-zh/ 复用的同源 figure-only 视图。 */
+  html[data-embed] body { background: var(--bg); }
+  html[data-embed] header.paper,
+  html[data-embed] .toc,
+  html[data-embed] article,
+  html[data-embed] footer { display: none !important; }
+  html[data-embed] main.layout {
+    display: block;
+    width: 100%;
+    max-width: none;
+    margin: 0;
+    padding: 0;
+  }
+  html[data-embed] .content > .fig-card { display: none; }
+  html[data-embed="weight"] #weight-explorer,
+  html[data-embed="kv"] #kv-explorer {
+    display: block;
+    width: 100%;
+    margin: 0;
+    border-radius: 10px;
+    box-shadow: none;
   }
 </style>
 </head>
