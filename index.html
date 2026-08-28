@@ -286,14 +286,9 @@
       <span class="fig-tag">图 1 · Interactive Weight</span>
       <span class="fig-title">W3 methods：K64/two-K32 schedules 与 paired scales</span>
     </div>
-    <p class="fig-sub">
-      选择 model、context 与 method。“Global” methods 始终同时包含 native SFB block scale 和一个 folded
-      tensor-global FP32 scale。所有实测 methods 都保留在 selector 与 full chart 中。左侧是实测 PPL/KL₅₀，
-      右侧是 payload 与 weight-only byte roofline。
-    </p>
     <div class="controls">
       <div class="ctrl"><div class="ctrl-label">Model</div><div class="seg" id="wSegModel"></div></div>
-      <div class="ctrl"><div class="ctrl-label">Context</div><div class="seg" id="wSegCtx"></div></div>
+      <div class="ctrl" id="wCtxCtrl"><div class="ctrl-label">Context</div><div class="seg" id="wSegCtx"></div></div>
       <div class="ctrl"><div class="ctrl-label">Method</div><select class="method-select" id="wMethodSelect" aria-label="Weight method"></select></div>
       <div class="ctrl"><div class="ctrl-label">数据来源</div><div class="seg" id="wSegSrc"></div></div>
       <div class="ctrl"><div class="ctrl-label">KL chart view</div><div class="seg" id="wSegView"></div></div>
@@ -317,16 +312,6 @@
         <div id="wxBars"></div>
         <div class="speed-caption" id="wxKernel"></div>
       </div>
-    </div>
-    <div class="fig-note">
-      <b>Contract correction。</b>Linear weight 是 W[N,K]，B=Wᵀ[K,N]。CUDA reference tile 是 512 indices +
-      一个 E4M3 LUT，即 3.125 bits/weight。可选 native block scaling 每个 N row 增加一个 UE8M0 SFB
-      （8 bytes/tile），得到 3.25 bits/weight —— 这是本文自始至终建模的 layout。对 <code>block32</code>
-      的编译加运行探测显示，指令实际提供的是每条 MMA <em>两个</em> UE8M0 因子（k&lt;32 与 k≥32 各一个），
-      跨所有 N 列共享且与 tile 宽度无关，即 202 B、3.156 bits/weight，且它沿收缩方向自适应而非按输出通道。
-      两者是不同的 quantizer：下面的精度表用建模 layout，与硬件共享方式对齐需要重新拟合 codebook。
-      two-K32 的 16-factor 布局在 N 轴上仍超出指令所能提供的范围。
-      Global scale 是 folded software metadata，不是 native LUT-B operand。
     </div>
   </section>
 
@@ -426,7 +411,7 @@
           交替只是放大它。</li>
         <li><strong>对 KV 来说，FP8 的 Q/P 几乎是免费的，而两个误差源相互独立。</strong>把 attention 误差
           拆开看：3-bit K/V 贡献 11.5% 相对 RMS，FP8 Q/P 只有 3.4%，而且两者按平方和合成而非叠乘 ——
-          合起来 11.9%，预测 11.9%。真正花掉精度的不是量化 Q 和 P，是 cache。</li>
+          合起来 11.9%，预测 11.9%。精度预算由 cache 主导，而非 Q/P。</li>
         <li><strong>真正还值得争论的是 scale 的 layout。</strong>把一个 K64 tile 切成两个独立 scale 的 K32
           半区，在模拟里读数更好，而 <code>block32</code> 本身确实是"沿 K 每 32 元素一个 scale"。没有定论的是
           共享轴:一个随输出通道自适应的因子，和一个沿收缩方向自适应的因子，是两种不同的 quantizer，本文这些行
@@ -481,11 +466,7 @@
       <li><code>nvdisasm</code></li>
     </ul>
     <p>
-      这让我们至少可以做 compile-time legality check。需要注意，vLLM 的
-      <a href="https://github.com/vllm-project/vllm/issues/49735">SM107 tracking issue</a> 仍然是 open，Triton 也只是
-      <a href="https://github.com/triton-lang/triton/commit/ab592f012f37f2c2ffc9ceda6c5b49b3c37c9036">initial Rubin support</a>；
-      software bring-up 还没有结束。
-    </p>
+      这让我们至少可以在编译期完成合法性检查，PTX ISA 9.4 也已文档化该解压指令本身及其操作数。</p>
 
     <h2 id="sec2"><span class="idx">2</span>最相关的新特性：3-bit programmable LUT-B</h2>
 
@@ -650,7 +631,7 @@ two K32    = 216 B = 3.375 bit/W，两遍掩码 A K64 pass 原生运行(~10% 墙
       <span class="cite"><a href="#ref-max">[1]</a><a href="#ref-lloyd">[2]</a></span>
       解决的是同一个问题的两半，通常各跑一次：Lloyd–Max 摆放八个 E4M3 质心使 tile 上的重建误差最小，
       然后 GPTQ 逐列走一遍、把每次舍入的误差推给尚未量化的列。问题是第二步改变了第一步所拟合的残差 ——
-      补偿前最优的 codebook，补偿后不再最优。这就提示应该交替，而不是顺序执行。
+      补偿前最优的 codebook，补偿后不再最优。这就提示应该交替，而不是顺序执行。这与 SqueezeLLM 是不同的维度：SqueezeLLM 是 §3.1 里的一种 tile-local codebook 拟合（用 Fisher 重要度加权的 Lloyd–Max），它改变的是单次 codebook 拟合<em>如何</em>加权；而这里的交替是让 codebook 拟合与另一独立的 GPTQ 误差补偿反复迭代。两者可以组合，但不是一回事。
     </p>
     <p>
       一轮交替的含义是：用补偿后的残差重新拟合八个质心，然后固定这组质心重跑列扫描。payload 格式完全不变，
@@ -714,7 +695,7 @@ two K32    = 216 B = 3.375 bit/W，两遍掩码 A K64 pass 原生运行(~10% 墙
     <h2 id="kv"><span class="idx">5</span>KV Cache Quantization <span class="faint">— Accuracy、Speed 与 Capacity Bounds</span></h2>
     <h3 id="sec3">5.1 Kernel Mapping：把 LUT-B 映射到 Attention</h3>
     <p>
-      Rubin LUT-B 有一条最重要的规则：<strong>它只在 MMA 内解压 matrix B</strong>。因此我们不把整个 attention
+      先说精度，因为它决定了结论：从 PPL 看，3-bit KV 完全可行 —— 整个预算就是把 codebook 与 scale 选好，并不是硬件限制。Rubin LUT-B 有一条最重要的规则：<strong>它只在 MMA 内解压 matrix B</strong>。因此我们不把整个 attention
       都压成 3-bit，而是压缩每个 decode step 都会反复读取的 cache；Q 和 P 仍作为 MXFP8 matrix A。
     </p>
 
@@ -1311,7 +1292,7 @@ const MODELS = {
       { key: "lm",       label: "Lloyd-Max \u00b7 3-bit",  color: "#31607f", bits: 3,  ppl: 1.601, kl: 0.00800, gpqa: "83.16%", seeds: "84.34 / 84.34 / 80.81", qp: "FP8/UE8M0 Q/P", kind: "k3v3", hw: true,
         desc: "Latent K3V3 on the shared 512-d c_KV of the 24 Gated-MLA layers; KDA states and the RoPE suffix stay native." },
       { key: "oscar_lm", label: "OSCAR+LM \u00b7 3-bit",   color: "#8a6a14", bits: 3,  ppl: 1.564, kl: 0.00679, gpqa: "89.73%", seeds: "89.39 / 89.90 / 89.90", qp: "FP8/UE8M0 Q/P", kind: "k3v3", hw: true,
-        desc: "One latent rotation, absorbed into the projections, in front of the latent codebook. Best PPL, KL\u2085\u2080 and GPQA." },
+        desc: "Best PPL, KL\u2085\u2080 and GPQA." },
     ],
   },
 };
@@ -1497,6 +1478,7 @@ function renderWeight() {
   seg("wSegCtx", [[8192,"8K"],[65536,"64K"],[131072,"128K"]], wState.ctx, k => {
     wState.ctx=+k; renderWeight();
   });
+  $("wCtxCtrl").style.display = wState.src === "prodkl" ? "none" : "";
   selectMenu("wMethodSelect", weightRows().map(r => [r.key,r.label]), wState.method, k => {
     wState.method=k;
     if (values[k][1] > 1) wState.view="all";
@@ -1555,11 +1537,8 @@ function renderWeight() {
     '<div class="method-line">'+row.about+'</div>'+
     '<div class="method-line"><strong>Kernel.</strong> '+row.kernel+'</div>'+
     '<div class="method-line"><strong>Storage.</strong> '+storage+'</div>'+
-    '<div class="method-line faint">'+(
-      row.nativeLutb === false
-        ? "This row has no Rubin kernel speed estimate."
-        : "The estimate is a sensitivity band over the full-tile LUT-B rate; the byte-only ceiling requires that rate near dense FP8, which is also its architectural ceiling."
-    )+'</div>';
+    (row.nativeLutb === false ? "" :
+      '<div class="method-line faint">The estimate is a sensitivity band over the full-tile LUT-B rate; the byte-only ceiling requires that rate near dense FP8, which is also its architectural ceiling.</div>');
   renderWeightChart();
 }
 
