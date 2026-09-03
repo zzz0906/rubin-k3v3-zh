@@ -5,14 +5,19 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Vera Rubin LUT-B：3-bit Weight、Activation 与 KV 的 Accuracy-First 实验</title>
 <meta name="description" content="准确讨论 Vera Rubin LUT-B 的 W3A8 weight、当前不受支持的 A3 路径与 K3V3 cache，包括 K64xN8 分组、实测精度、kernel bound 与 request-level HBM capacity arithmetic。">
+<meta name="robots" content="noindex,follow">
+<link rel="canonical" href="https://www.zhongzhuzhou.org/verarubin-short-zh/">
 <script>
   {
     const mode = new URLSearchParams(window.location.search).get("embed");
     if (mode === "weight" || mode === "kv") {
       document.documentElement.dataset.embed = mode;
+    } else {
+      window.location.replace("/verarubin-short-zh/");
     }
   }
 </script>
+<noscript><meta http-equiv="refresh" content="0; url=/verarubin-short-zh/"></noscript>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;0,6..72,700;1,6..72,400;1,6..72,500&family=Noto+Sans+SC:wght@400;500;600;700&family=Noto+Serif+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
